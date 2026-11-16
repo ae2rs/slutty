@@ -54,9 +54,8 @@ impl Spawn {
     /// The user's login shell from the password database, in their home.
     pub fn login_shell() -> Self {
         let (shell, home) = passwd_entry();
-        let program = shell
-            .or_else(|| std::env::var_os("SHELL").map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from("/bin/zsh"));
+        let program =
+            shell.or_else(|| std::env::var_os("SHELL").map(PathBuf::from)).unwrap_or_else(|| PathBuf::from("/bin/zsh"));
         let cwd = home.or_else(|| std::env::var_os("HOME").map(PathBuf::from));
         Self { program, args: Vec::new(), login: true, cwd, env: Vec::new() }
     }
@@ -87,11 +86,7 @@ impl Pty {
     /// Starts `spawn` on a new PTY. `wake` runs on the reader thread when
     /// output arrives while no earlier wake is pending, and once when the
     /// child closes the terminal.
-    pub fn spawn(
-        spawn: &Spawn,
-        size: WindowSize,
-        wake: impl Fn() + Send + 'static,
-    ) -> io::Result<Self> {
+    pub fn spawn(spawn: &Spawn, size: WindowSize, wake: impl Fn() + Send + 'static) -> io::Result<Self> {
         let (master, slave) = open_pty(size)?;
         let child = spawn_child(spawn, &slave)?;
         drop(slave);
@@ -109,9 +104,7 @@ impl Pty {
         let (in_tx, in_rx) = mpsc::channel();
         let writer = {
             let master = File::from(master.try_clone()?);
-            thread::Builder::new()
-                .name("pty-writer".into())
-                .spawn(move || write_loop(master, &in_rx))?
+            thread::Builder::new().name("pty-writer".into()).spawn(move || write_loop(master, &in_rx))?
         };
 
         Ok(Self {
@@ -275,11 +268,7 @@ fn wait_readable(master: &File, shutdown: &OwnedFd) -> io::Result<Readable> {
         }
     }
     // The shutdown pipe only ever hangs up, when its write end is dropped.
-    if fds[1].revents != 0 {
-        Ok(Readable::Shutdown)
-    } else {
-        Ok(Readable::Data)
-    }
+    if fds[1].revents != 0 { Ok(Readable::Shutdown) } else { Ok(Readable::Data) }
 }
 
 fn open_pty(size: WindowSize) -> io::Result<(OwnedFd, OwnedFd)> {
@@ -360,9 +349,8 @@ fn passwd_entry() -> (Option<PathBuf>, Option<PathBuf>) {
     let mut buf = vec![0 as libc::c_char; 4096];
     let mut result = std::ptr::null_mut();
     // SAFETY: all pointers are valid for the sizes given.
-    let rc = unsafe {
-        libc::getpwuid_r(libc::getuid(), entry.as_mut_ptr(), buf.as_mut_ptr(), buf.len(), &raw mut result)
-    };
+    let rc =
+        unsafe { libc::getpwuid_r(libc::getuid(), entry.as_mut_ptr(), buf.as_mut_ptr(), buf.len(), &raw mut result) };
     if rc != 0 || result.is_null() {
         return (None, None);
     }
