@@ -32,7 +32,7 @@ use super::layout::Layout;
 use super::pointer::Hover;
 use super::quick_select::QuickSelect;
 use super::state::{self, App, with_app};
-use super::tab_bar::{self, SpinnerFrame};
+use super::tab_bar::{self, Strip};
 use super::ticker;
 use crate::animation::Live;
 use crate::config::{self, Config, OptionAsAlt};
@@ -44,11 +44,11 @@ use crate::terminal::{CellStyle, Highlight, KeyInput, MouseInput, SearchStatus};
 pub struct Ivars {
     window: WindowId,
     surface: RefCell<Surface>,
-    /// Over the tab bar row: rho's spinners, so they animate without drawing
-    /// the window.
-    spinner_surface: RefCell<Surface>,
-    /// What the spinner surface shows; `None` while it is hidden.
-    spinner: RefCell<Option<SpinnerFrame>>,
+    /// Over the tab bar row: what changes there with time alone, such as rho's
+    /// spinners, so it updates without drawing the window.
+    strip_surface: RefCell<Surface>,
+    /// What the strip shows; `None` while it is hidden.
+    strip: RefCell<Option<Strip>>,
     /// Some of the window shows on a screen; see [`TerminalView::update_on_screen`].
     on_screen: Cell<bool>,
     /// The zones last reported live, so the timer is armed again only when
@@ -127,7 +127,7 @@ define_class!(
             let Some(window) = self.window() else { return };
             let scale = window.backingScaleFactor();
             self.ivars().surface.borrow().layer().setContentsScale(scale);
-            self.ivars().spinner_surface.borrow().layer().setContentsScale(scale);
+            self.ivars().strip_surface.borrow().layer().setContentsScale(scale);
             let changed = with_app(|app| {
                 if app.scale == scale {
                     return false;
@@ -391,14 +391,14 @@ impl TerminalView {
         scale: f64,
     ) -> Retained<Self> {
         let surface = Surface::new(device, scale);
-        let spinner_surface = Surface::transparent(device, scale);
-        spinner_surface.layer().setHidden(true);
-        surface.layer().addSublayer(spinner_surface.layer());
+        let strip_surface = Surface::transparent(device, scale);
+        strip_surface.layer().setHidden(true);
+        surface.layer().addSublayer(strip_surface.layer());
         let ivars = Ivars {
             window,
             surface: RefCell::new(surface),
-            spinner_surface: RefCell::new(spinner_surface),
-            spinner: RefCell::new(None),
+            strip_surface: RefCell::new(strip_surface),
+            strip: RefCell::new(None),
             on_screen: Cell::new(false),
             live: Cell::new(Live::default()),
             input_at: Cell::new(Instant::now()),
@@ -509,17 +509,16 @@ impl TerminalView {
         ivars.layout.set(layout);
         let size = NSSize::new(f64::from(layout.width), f64::from(layout.height));
         ivars.surface.borrow().layer().setDrawableSize(size);
-        self.place_spinner_surface(layout);
+        self.place_strip(layout);
         ivars.overlay_dirty.set(true);
         self.draw();
     }
 
-    /// Lays the spinner surface over the tab bar row, hidden until it is
-    /// drawn again.
-    fn place_spinner_surface(&self, layout: Layout) {
+    /// Lays the strip over the tab bar row, hidden until it is drawn again.
+    fn place_strip(&self, layout: Layout) {
         let ivars = self.ivars();
         let surface = ivars.surface.borrow();
-        let spinner = ivars.spinner_surface.borrow();
+        let strip = ivars.strip_surface.borrow();
         let scale = surface.layer().contentsScale();
         let height = f64::from(layout.area.cell_height);
         let size = CGSize::new(f64::from(layout.width) / scale, height / scale);
@@ -528,11 +527,11 @@ impl TerminalView {
         // Moved, resized and hidden at once, not animated.
         CATransaction::begin();
         CATransaction::setDisableActions(true);
-        spinner.layer().setFrame(CGRect::new(CGPoint::new(0.0, y), size));
-        spinner.layer().setHidden(true);
+        strip.layer().setFrame(CGRect::new(CGPoint::new(0.0, y), size));
+        strip.layer().setHidden(true);
         CATransaction::commit();
-        spinner.layer().setDrawableSize(CGSize::new(f64::from(layout.width), height));
-        *ivars.spinner.borrow_mut() = None;
+        strip.layer().setDrawableSize(CGSize::new(f64::from(layout.width), height));
+        *ivars.strip.borrow_mut() = None;
     }
 
     /// Draws if a visible pane or the window's own chrome changed. Returns
@@ -549,7 +548,7 @@ impl TerminalView {
             let config = &settings.config;
             let m = renderer.metrics();
             let mut chrome = Vec::new();
-            let mut spinner = None;
+            let mut strip = None;
             if layout.tab_bar {
                 let cols = (layout.width / m.cell_width) as usize;
                 let bar = tab_bar::build(
@@ -564,7 +563,7 @@ impl TerminalView {
                 *ivars.tab_cells.borrow_mut() = bar.tabs;
                 if !bar.spinners.is_empty() && settings.error.is_none() {
                     let frame = ticker::phase(Live::default(), Instant::now()).spinner;
-                    spinner = Some(SpinnerFrame { spinners: bar.spinners, background: bar.line.background, frame });
+                    strip = Some(Strip { spinners: bar.spinners, background: bar.line.background, frame });
                 }
                 chrome.push(bar.line);
             }
@@ -681,7 +680,7 @@ impl TerminalView {
             ivars.shown.set(shown);
             let surface = &mut ivars.surface.borrow_mut();
             renderer.render(surface, &mut panes, &rects, &chrome, Some(rgb(theme.background)), shown);
-            self.show_spinner(renderer, spinner);
+            self.show_strip(renderer, strip);
             Some((cursor, m))
         })
         .flatten();
@@ -698,24 +697,24 @@ impl TerminalView {
         true
     }
 
-    /// Draws `spinner` on its surface if it differs from what is there, or
+    /// Draws `strip` on its surface if it differs from what is there, or
     /// hides the surface for `None`.
-    fn show_spinner(&self, renderer: &mut Renderer, spinner: Option<SpinnerFrame>) {
+    fn show_strip(&self, renderer: &mut Renderer, strip: Option<Strip>) {
         let ivars = self.ivars();
-        if *ivars.spinner.borrow() == spinner {
+        if *ivars.strip.borrow() == strip {
             return;
         }
-        let surface = &mut ivars.spinner_surface.borrow_mut();
+        let surface = &mut ivars.strip_surface.borrow_mut();
         CATransaction::begin();
         CATransaction::setDisableActions(true);
-        surface.layer().setHidden(spinner.is_none());
+        surface.layer().setHidden(strip.is_none());
         CATransaction::commit();
-        if let Some(spinner) = &spinner {
-            let lines = spinner.lines(renderer.metrics().cell_width as f32);
+        if let Some(strip) = &strip {
+            let lines = strip.lines(renderer.metrics().cell_width as f32);
             renderer.render(surface, &mut [], &[], &lines, None, Shown::ALL);
-            log::trace!("spinner presented");
+            log::trace!("strip presented");
         }
-        *ivars.spinner.borrow_mut() = spinner;
+        *ivars.strip.borrow_mut() = strip;
     }
 
     /// The zones animating in this window now.
@@ -723,7 +722,7 @@ impl TerminalView {
         let ivars = self.ivars();
         let on_screen = ivars.on_screen.get();
         Live {
-            spinner: on_screen && ivars.spinner.borrow().is_some(),
+            spinner: on_screen && ivars.strip.borrow().as_ref().is_some_and(|s| !s.spinners.is_empty()),
             cursor: (on_screen && ivars.focused.get() && ivars.cursor_blinks.get()).then(|| ivars.input_at.get()),
             text: on_screen && ivars.focused.get() && ivars.surface.borrow().blinks_text(),
         }
@@ -743,13 +742,13 @@ impl TerminalView {
         let ivars = self.ivars();
         let live = self.live();
         let phase = ticker::phase(live, now);
-        let spinner = ivars.spinner.borrow().clone();
-        if let Some(spinner) = spinner
+        let strip = ivars.strip.borrow().clone();
+        if let Some(strip) = strip
             && live.spinner
-            && spinner.frame != phase.spinner
+            && strip.frame != phase.spinner
         {
-            let spinner = SpinnerFrame { frame: phase.spinner, ..spinner };
-            with_app(|app| self.show_spinner(&mut app.renderer, Some(spinner)));
+            let strip = Strip { frame: phase.spinner, ..strip };
+            with_app(|app| self.show_strip(&mut app.renderer, Some(strip)));
         }
         let shown = Shown { cursor: phase.cursor, text: phase.text };
         if shown != ivars.shown.get() {

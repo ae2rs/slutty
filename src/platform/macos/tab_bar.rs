@@ -91,16 +91,16 @@ pub fn build(
     TabBar { line, tabs: ranges, spinners }
 }
 
-/// What the spinner layer shows: the working tabs' marks at `frame` of the
-/// spinner, each on a cell of the tab bar's `background`.
+/// What the strip over the tab bar shows: the working tabs' marks at `frame`
+/// of the spinner, each on a cell of the tab bar's `background`.
 #[derive(Clone, Debug, PartialEq)]
-pub struct SpinnerFrame {
+pub struct Strip {
     pub spinners: Vec<Spinner>,
     pub background: Rgb,
     pub frame: usize,
 }
 
-impl SpinnerFrame {
+impl Strip {
     /// One line per mark, for a layer over the tab bar `cell_width` pixels
     /// to a cell.
     pub fn lines(&self, cell_width: f32) -> Vec<Line> {
@@ -179,7 +179,7 @@ mod tests {
     fn the_spinner_layer_draws_each_mark_at_its_cell() {
         let blue = Rgb { r: 0, g: 0, b: 255 };
         let black = Rgb { r: 0, g: 0, b: 0 };
-        let frame = SpinnerFrame { spinners: vec![Spinner { cell: 3, color: blue }], background: black, frame: 12 };
+        let frame = Strip { spinners: vec![Spinner { cell: 3, color: blue }], background: black, frame: 12 };
         let lines = frame.lines(10.0);
         assert_eq!(lines.len(), 1);
         assert_eq!((lines[0].x, lines[0].width, lines[0].background), (30.0, 10.0, black));

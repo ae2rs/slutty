@@ -292,7 +292,7 @@ Each milestone is one PR. Each must keep the idle rule: no work while nothing ch
 2. Focus the window and leave it for 60 s at a static prompt.
 3. Sample with `top -l 4 -s 20 -pid <pid> -stats pid,cpu,idlew,time`.
 4. Pass: CPU 0.0%, idle wake-ups 0, CPU time flat, no new `frame presented` lines.
-5. With an animation on screen, such as rho's spinner, run the same sample. Expect about 10 wake-ups a second, `spinner presented` lines, and no `frame presented` lines.
+5. With an animation on screen, such as rho's spinner, run the same sample. Expect about 10 wake-ups a second, `strip presented` lines, and no `frame presented` lines.
 
 ### M1: MVP
 
