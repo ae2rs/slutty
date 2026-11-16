@@ -7,4 +7,4 @@ mod row;
 
 pub use links::link_at;
 pub use quick_select::{Labelled, default_patterns, find, url_pattern};
-pub use row::{RowText, Span};
+pub use row::RowText;

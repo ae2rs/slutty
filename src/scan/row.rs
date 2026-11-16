@@ -50,15 +50,6 @@ impl RowText {
             Err(i) => self.starts.get(i).map_or(self.cols, |&(_, col)| col),
         }
     }
-
-    /// The byte offset of the character in cell `col`.
-    pub fn offset(&self, col: u16) -> usize {
-        match self.starts.binary_search_by_key(&col, |&(_, c)| c) {
-            Ok(i) => self.starts[i].0,
-            // Inside a wide glyph: its start.
-            Err(i) => i.checked_sub(1).map_or(0, |i| self.starts[i].0),
-        }
-    }
 }
 
 /// Cells `start..end` of row `row`.
@@ -107,7 +98,5 @@ mod tests {
         assert_eq!(text.col(1), 1);
         assert_eq!(text.col(4), 3, "after the three bytes of 界");
         assert_eq!(text.col(5), 4, "the end of the row");
-        assert_eq!(text.offset(2), 1, "the spacer belongs to 界");
-        assert_eq!(text.offset(3), 4);
     }
 }
