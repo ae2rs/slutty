@@ -29,13 +29,15 @@ pub fn build(tabs: &[TabView<'_>], theme: &Theme, cols: usize, max_width: u16, w
     for (i, tab) in tabs.iter().enumerate() {
         // The first tab starts clear of the window's rounded corner.
         let inset = if i == 0 { " " } else { "" };
-        // A cell for a mark, so titles never shift when one appears.
-        let mark = match tab.info.rho {
-            Some(RhoActivity::Working) => '✦',
-            Some(RhoActivity::Question) => '?',
-            Some(RhoActivity::Stopped) => '✕',
-            Some(RhoActivity::Unread) => '•',
-            None => ' ',
+        // A cell for a mark, so titles never shift when one appears. Only the
+        // active tab's working star is colored; the others stay grey.
+        let (blue, muted) = (theme.ansi[4], theme.ansi[8]);
+        let (mark, mark_color) = match tab.info.rho {
+            Some(RhoActivity::Working) => ('✦', if tab.active { blue } else { muted }),
+            Some(RhoActivity::Question) => ('?', blue),
+            Some(RhoActivity::Stopped) => ('✕', theme.ansi[1]),
+            Some(RhoActivity::Unread) => ('•', theme.ansi[2]),
+            None => (' ', theme.foreground),
         };
         let cwd = tab.info.cwd.as_deref().map(dir_name).unwrap_or_default();
         let text = format!("{inset}{mark} {} {cwd} ", i + 1);
@@ -46,6 +48,9 @@ pub fn build(tabs: &[TabView<'_>], theme: &Theme, cols: usize, max_width: u16, w
         }
         let fg = if tab.active { theme.ansi[3] } else { theme.foreground };
         line.push_str(&text, rgb(fg), CellStyle::default());
+        if let Some(cell) = line.cells.get_mut(start + inset.len()) {
+            cell.fg = rgb(mark_color);
+        }
         ranges.push(start..line.cells.len());
         // The separator belongs to no tab.
         line.push_str(" ", rgb(theme.foreground), CellStyle::default());
@@ -95,6 +100,9 @@ mod tests {
         let rho = PaneInfo { cwd: Some("/a".into()), rho: Some(RhoActivity::Question), ..PaneInfo::default() };
         let bar = build(&[TabView { active: true, info: &rho }], &Theme::default(), 80, 32, 800.0);
         assert_eq!(text(&bar), " ? 1 a  ");
+        let [r, g, b] = Theme::default().ansi[4];
+        assert_eq!(bar.line.cells[1].fg, Rgb { r, g, b }, "the mark has its own color");
+        assert_ne!(bar.line.cells[1].fg, bar.line.cells[3].fg);
     }
 
     #[test]
