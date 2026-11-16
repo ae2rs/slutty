@@ -16,6 +16,9 @@ const CURSOR_BLINK: Duration = Duration::from_millis(800);
 /// How long after input a cursor keeps blinking before it holds still.
 const CURSOR_CUTOFF: Duration = Duration::from_secs(5);
 
+/// How long blinking text stays on, then off.
+const TEXT_BLINK: Duration = Duration::from_millis(500);
+
 /// What animates in one window now: its live zones.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Live {
@@ -24,6 +27,8 @@ pub struct Live {
     /// The cursor of a key window on screen blinks, its phase starting at
     /// this input.
     pub cursor: Option<Instant>,
+    /// A key window on screen shows text that blinks.
+    pub text: bool,
 }
 
 /// What the zones show at one moment.
@@ -33,6 +38,8 @@ pub struct Phase {
     pub spinner: usize,
     /// A blinking cursor is in its visible half; a steady one always is.
     pub cursor: bool,
+    /// Blinking text is in its visible half.
+    pub text: bool,
 }
 
 /// Time for every animation, counted from one epoch so that zones in
@@ -51,6 +58,7 @@ impl Clock {
         Phase {
             spinner: (steps(self.epoch, now, SPINNER_FRAME) % SPINNER.len() as u128) as usize,
             cursor: live.cursor.is_none_or(|since| cursor_on(since, now)),
+            text: !live.text || steps(self.epoch, now, TEXT_BLINK).is_multiple_of(2),
         }
     }
 
@@ -58,7 +66,8 @@ impl Clock {
     pub fn next_change(&self, live: Live, now: Instant) -> Option<Instant> {
         let spinner = live.spinner.then(|| next_step(self.epoch, now, SPINNER_FRAME));
         let cursor = live.cursor.and_then(|since| next_cursor_change(since, now));
-        spinner.into_iter().chain(cursor).min()
+        let text = live.text.then(|| next_step(self.epoch, now, TEXT_BLINK));
+        [spinner, cursor, text].into_iter().flatten().min()
     }
 }
 
@@ -151,10 +160,21 @@ mod tests {
     }
 
     #[test]
+    fn text_blinks_every_half_second_in_step_across_windows() {
+        let epoch = Instant::now();
+        let clock = Clock::new(epoch);
+        let live = Live { text: true, ..Live::default() };
+        let on = |ms: u32| clock.phase(live, epoch + ms * MS).text;
+        assert!(on(0) && on(499) && !on(500) && on(1_000));
+        assert!(clock.phase(Live::default(), epoch + 700 * MS).text, "shown while not live");
+        assert_eq!(clock.next_change(live, epoch + 620 * MS), Some(epoch + 1_000 * MS));
+    }
+
+    #[test]
     fn the_timer_wakes_for_the_soonest_zone() {
         let epoch = Instant::now();
         let clock = Clock::new(epoch);
-        let live = Live { spinner: true, cursor: Some(epoch + 50 * MS) };
+        let live = Live { spinner: true, cursor: Some(epoch + 50 * MS), text: false };
         assert_eq!(clock.next_change(live, epoch + 820 * MS), Some(epoch + 850 * MS));
         assert_eq!(clock.next_change(live, epoch + 860 * MS), Some(epoch + 900 * MS));
     }

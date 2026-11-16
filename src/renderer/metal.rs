@@ -216,8 +216,8 @@ impl Renderer {
             batches.extend([
                 (uniforms, Zone::Always, Batch::Rects(&s.rects)),
                 (uniforms, Zone::Always, Batch::Glyphs(&s.glyphs)),
-                (uniforms, Zone::Always, Batch::Rects(&s.blink_rects)),
-                (uniforms, Zone::Always, Batch::Glyphs(&s.blink_glyphs)),
+                (uniforms, Zone::Text, Batch::Rects(&s.blink_rects)),
+                (uniforms, Zone::Text, Batch::Glyphs(&s.blink_glyphs)),
                 (uniforms, overlay, Batch::Rects(&s.overlay_rects)),
                 (uniforms, overlay, Batch::Glyphs(&s.overlay_glyphs)),
             ]);
@@ -325,21 +325,28 @@ impl Surface {
     pub fn layer(&self) -> &Retained<CAMetalLayer> {
         &self.layer
     }
+
+    /// What was drawn last has text that blinks.
+    pub fn blinks_text(&self) -> bool {
+        self.packed.as_ref().is_some_and(|p| p.batches.iter().any(|b| b.zone == Zone::Text && b.count > 0))
+    }
 }
 
 /// Which zones that blink are in their visible phase.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Shown {
     pub cursor: bool,
+    pub text: bool,
 }
 
 impl Shown {
-    pub const ALL: Self = Self { cursor: true };
+    pub const ALL: Self = Self { cursor: true, text: true };
 
     fn lets(self, zone: Zone) -> bool {
         match zone {
             Zone::Always => true,
             Zone::Cursor => self.cursor,
+            Zone::Text => self.text,
         }
     }
 }
@@ -350,6 +357,8 @@ enum Zone {
     Always,
     /// A blinking cursor, drawn in its visible phase.
     Cursor,
+    /// Text that asked to blink (SGR 5 or 6) and its decorations.
+    Text,
 }
 
 /// Instances copied into one GPU buffer, and where each batch lies in it.
@@ -526,7 +535,25 @@ mod tests {
         pane.overlay.focused = true;
         let packed = offscreen.prepare(&mut [pane]);
         assert_eq!(offscreen.pixel(&packed, Shown::ALL), [255, 0, 0, 255]);
-        assert_eq!(offscreen.pixel(&packed, Shown { cursor: false }), [0, 0, 0, 255]);
+        assert_eq!(offscreen.pixel(&packed, Shown { cursor: false, text: true }), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn a_surface_knows_when_its_text_blinks() {
+        let mut offscreen = Offscreen::new();
+        let frame = blank_frame(Rgb { r: 0, g: 0, b: 0 });
+        let mut surface = Surface::new(&offscreen.renderer.device, 1.0);
+        surface.packed = Some(offscreen.prepare(&mut [pane(&frame, Tint::NONE)]));
+        assert!(!surface.blinks_text());
+        {
+            let mut frame = frame.borrow_mut();
+            let cell = &mut frame.rows[0].cells[0];
+            cell.text = Grapheme::Char('x');
+            cell.style.blink = true;
+            frame.rows[0].dirty = true;
+        }
+        surface.packed = Some(offscreen.prepare(&mut [pane(&frame, Tint::NONE)]));
+        assert!(surface.blinks_text());
     }
 
     #[test]

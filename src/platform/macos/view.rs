@@ -673,7 +673,11 @@ impl TerminalView {
                 })
                 .collect();
             ivars.cursor_blinks.set(cursor_blinks);
-            let shown = Shown { cursor: ticker::phase(self.live(), Instant::now()).cursor };
+            // Whether text blinks is known only once built; with none, `text`
+            // hides nothing.
+            let live = Live { text: ivars.on_screen.get() && focused, ..self.live() };
+            let phase = ticker::phase(live, Instant::now());
+            let shown = Shown { cursor: phase.cursor, text: phase.text };
             ivars.shown.set(shown);
             let surface = &mut ivars.surface.borrow_mut();
             renderer.render(surface, &mut panes, &rects, &chrome, Some(rgb(theme.background)), shown);
@@ -721,6 +725,7 @@ impl TerminalView {
         Live {
             spinner: on_screen && ivars.spinner.borrow().is_some(),
             cursor: (on_screen && ivars.focused.get() && ivars.cursor_blinks.get()).then(|| ivars.input_at.get()),
+            text: on_screen && ivars.focused.get() && ivars.surface.borrow().blinks_text(),
         }
     }
 
@@ -746,7 +751,7 @@ impl TerminalView {
             let spinner = SpinnerFrame { frame: phase.spinner, ..spinner };
             with_app(|app| self.show_spinner(&mut app.renderer, Some(spinner)));
         }
-        let shown = Shown { cursor: phase.cursor };
+        let shown = Shown { cursor: phase.cursor, text: phase.text };
         if shown != ivars.shown.get() {
             let redrawn = with_app(|app| app.renderer.redraw(&ivars.surface.borrow(), shown));
             if redrawn == Some(true) {
