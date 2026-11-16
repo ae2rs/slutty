@@ -7,7 +7,7 @@ use std::path::Path;
 use libghostty_vt::color::Rgb;
 
 use crate::config::{self, Theme};
-use crate::mux::TabView;
+use crate::mux::{RhoActivity, TabView};
 use crate::renderer::Line;
 use crate::terminal::CellStyle;
 
@@ -20,8 +20,8 @@ pub struct TabBar {
     pub tabs: Vec<Range<usize>>,
 }
 
-/// Lays out `tabs` across `cols` cells. Each reads ` 2 dir `: the index,
-/// then the active pane's directory.
+/// Lays out `tabs` across `cols` cells. Each reads `✦ 2 dir `: rho's mark,
+/// the index, then the active pane's directory.
 pub fn build(tabs: &[TabView<'_>], theme: &Theme, cols: usize, max_width: u16, width: f32) -> TabBar {
     let rgb = |[r, g, b]: config::Rgb| Rgb { r, g, b };
     let mut line = Line::new(0.0, 0.0, width, rgb(theme.background));
@@ -30,7 +30,13 @@ pub fn build(tabs: &[TabView<'_>], theme: &Theme, cols: usize, max_width: u16, w
         // The first tab starts clear of the window's rounded corner.
         let inset = if i == 0 { " " } else { "" };
         // A cell for a mark, so titles never shift when one appears.
-        let mark = " ";
+        let mark = match tab.info.rho {
+            Some(RhoActivity::Working) => '✦',
+            Some(RhoActivity::Question) => '?',
+            Some(RhoActivity::Stopped) => '✕',
+            Some(RhoActivity::Unread) => '•',
+            None => ' ',
+        };
         let cwd = tab.info.cwd.as_deref().map(dir_name).unwrap_or_default();
         let text = format!("{inset}{mark} {} {cwd} ", i + 1);
         let text: String = text.chars().take(usize::from(max_width)).collect();
@@ -82,6 +88,13 @@ mod tests {
         assert_eq!(bar.tabs, vec![0..8, 9..24]);
         assert_eq!(bar.line.cells[10].fg, bar.line.cells[11].fg);
         assert_ne!(bar.line.cells[1].fg, bar.line.cells[10].fg, "the active tab stands out");
+    }
+
+    #[test]
+    fn rho_marks_its_tab() {
+        let rho = PaneInfo { cwd: Some("/a".into()), rho: Some(RhoActivity::Question), ..PaneInfo::default() };
+        let bar = build(&[TabView { active: true, info: &rho }], &Theme::default(), 80, 32, 800.0);
+        assert_eq!(text(&bar), " ? 1 a  ");
     }
 
     #[test]
