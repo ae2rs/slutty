@@ -6,4 +6,4 @@ mod metal;
 mod scene;
 
 pub use metal::{PIXEL_FORMAT, PaneDraw, Renderer};
-pub use scene::{Line, Overlay};
+pub use scene::{Line, Overlay, RectInstance};

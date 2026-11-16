@@ -53,8 +53,6 @@ pub struct PaneDraw<'a> {
     /// Top-left corner in device pixels.
     pub origin: [f32; 2],
     pub overlay: Overlay<'a>,
-    /// Shown darker, as panes without the keyboard are.
-    pub dim: bool,
 }
 
 pub struct Renderer {
@@ -122,9 +120,16 @@ impl Renderer {
         self.scenes.clear();
     }
 
-    /// Draws the panes into `layer` over `clear`, and the `chrome` lines
-    /// over them.
-    pub fn render(&mut self, layer: &CAMetalLayer, panes: &mut [PaneDraw<'_>], chrome: &[Line], clear: Rgb) {
+    /// Draws the panes into `layer` over `clear`, then `rects` (device
+    /// pixels from the top-left), then the `chrome` lines.
+    pub fn render(
+        &mut self,
+        layer: &CAMetalLayer,
+        panes: &mut [PaneDraw<'_>],
+        rects: &[RectInstance],
+        chrome: &[Line],
+        clear: Rgb,
+    ) {
         self.scenes.retain(|id, _| panes.iter().any(|p| p.id == *id));
         if self.build(panes, chrome).is_err() {
             log::info!("glyph atlas full; starting over");
@@ -142,16 +147,6 @@ impl Renderer {
         };
         let size = layer.drawableSize();
         let viewport = [size.width as f32, size.height as f32];
-        let m = self.fonts.metrics();
-        let dims: Vec<RectInstance> = panes
-            .iter()
-            .filter(|p| p.dim)
-            .map(|p| {
-                let (cols, rows) = (p.frame.cols, p.frame.rows.len());
-                let size = [f32::from(cols) * m.cell_width as f32, rows as f32 * m.cell_height as f32];
-                RectInstance::new(p.origin, size, DIM)
-            })
-            .collect();
         let mut batches = Vec::new();
         for pane in panes.iter() {
             let Some(s) = self.scenes.get(&pane.id) else { continue };
@@ -165,7 +160,7 @@ impl Renderer {
         }
         let screen = Uniforms { viewport, origin: [0.0, 0.0] };
         batches.extend([
-            (screen, Batch::Rects(&dims)),
+            (screen, Batch::Rects(rects)),
             (screen, Batch::Rects(&self.chrome.rects)),
             (screen, Batch::Glyphs(&self.chrome.glyphs)),
         ]);
@@ -243,9 +238,6 @@ impl Renderer {
         Ok(())
     }
 }
-
-/// Black at a fifth: WezTerm's inactive panes, at 0.8 brightness.
-const DIM: [u8; 4] = [0, 0, 0, 51];
 
 enum Batch<'a> {
     Rects(&'a [RectInstance]),
