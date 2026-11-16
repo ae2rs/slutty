@@ -8,6 +8,7 @@ use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
 use super::chord::Chord;
+use crate::mux::Direction;
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(tag = "action", rename_all = "kebab-case", deny_unknown_fields)]
@@ -45,6 +46,34 @@ pub enum Action {
         index: TabIndex,
     },
     ToggleTabBar,
+    /// Splits the active pane; the new pane goes to the right.
+    SplitRight,
+    /// Splits the active pane; the new pane goes below.
+    SplitDown,
+    ClosePane {
+        /// Ask first when something other than a shell runs in it.
+        #[serde(default)]
+        confirm: bool,
+    },
+    /// Makes the pane next to the active one active.
+    FocusPane {
+        direction: Direction,
+    },
+    /// Moves the divider nearest the active pane.
+    ResizePane {
+        direction: Direction,
+        #[serde(default = "one")]
+        cells: u16,
+    },
+    ToggleZoom,
+    /// Moves every pane of the tab one place along, keeping the layout.
+    RotatePanes,
+    /// Labels the panes; the next key picks one.
+    PaneSelect,
+}
+
+fn one() -> u16 {
+    1
 }
 
 /// A tab by position: 1 is the first, -1 the last.

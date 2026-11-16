@@ -41,6 +41,30 @@
 "leader Z" = "toggle-tab-bar"
 "cmd+Z" = "toggle-tab-bar"
 
+"leader v" = "split-right"
+"leader -" = "split-down"
+"leader x" = { action = "close-pane", confirm = true }
+"leader h" = { action = "focus-pane", direction = "left" }
+"leader j" = { action = "focus-pane", direction = "down" }
+"leader k" = { action = "focus-pane", direction = "up" }
+"leader l" = { action = "focus-pane", direction = "right" }
+"cmd+h" = { action = "focus-pane", direction = "left" }
+"cmd+j" = { action = "focus-pane", direction = "down" }
+"cmd+k" = { action = "focus-pane", direction = "up" }
+"cmd+l" = { action = "focus-pane", direction = "right" }
+"leader H" = { action = "resize-pane", direction = "left", cells = 5 }
+"leader J" = { action = "resize-pane", direction = "down", cells = 5 }
+"leader K" = { action = "resize-pane", direction = "up", cells = 5 }
+"leader L" = { action = "resize-pane", direction = "right", cells = 5 }
+"leader r" = { action = "key-table", name = "resize", sticky = true }
+"cmd+r" = { action = "key-table", name = "resize", sticky = true }
+"leader z" = "toggle-zoom"
+"cmd+z" = "toggle-zoom"
+"leader e" = "rotate-panes"
+"cmd+e" = "rotate-panes"
+"leader p" = "pane-select"
+"cmd+p" = "pane-select"
+
 "leader R" = "reload-config"
 "cmd+R" = "reload-config"
 "alt+enter" = "toggle-fullscreen"
@@ -51,3 +75,17 @@
 "opt+left" = { action = "send", text = "\u001bb" }
 "opt+right" = { action = "send", text = "\u001bf" }
 "cmd+backspace" = { action = "send-key", key = "ctrl+u" }
+
+# Resize the active pane a cell at a time until escape.
+[tables.resize]
+"h" = { action = "resize-pane", direction = "left" }
+"j" = { action = "resize-pane", direction = "down" }
+"k" = { action = "resize-pane", direction = "up" }
+"l" = { action = "resize-pane", direction = "right" }
+"left" = { action = "resize-pane", direction = "left" }
+"down" = { action = "resize-pane", direction = "down" }
+"up" = { action = "resize-pane", direction = "up" }
+"right" = { action = "resize-pane", direction = "right" }
+"escape" = "pop-table"
+"enter" = "pop-table"
+"ctrl+c" = "pop-table"
