@@ -5,7 +5,7 @@ use objc2::runtime::{NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSEventModifierFlags,
-    NSMenu, NSMenuItem, NSScreen, NSWindow, NSWindowStyleMask,
+    NSMenu, NSMenuItem, NSScreen, NSWindow, NSWindowButton, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{NSObject, NSPoint, NSRect, NSString};
 
@@ -61,7 +61,10 @@ pub fn run(config: Config) -> ExitCode {
 
     let size = content_size(&config, renderer.metrics(), scale);
     let rect = NSRect::new(NSPoint::new(0.0, 0.0), size);
+    // Titled keeps the rounded corners, shadow and key focus; the title bar
+    // itself is hidden below.
     let style = NSWindowStyleMask::Titled
+        | NSWindowStyleMask::FullSizeContentView
         | NSWindowStyleMask::Closable
         | NSWindowStyleMask::Miniaturizable
         | NSWindowStyleMask::Resizable;
@@ -77,6 +80,7 @@ pub fn run(config: Config) -> ExitCode {
     // The window is owned here, not released by AppKit on close.
     unsafe { window.setReleasedWhenClosed(false) };
     window.setTitle(&NSString::from_str("slutty"));
+    hide_titlebar(&window);
     window.center();
 
     let view = TerminalView::new(mtm, rect, renderer, config, scale);
@@ -88,6 +92,27 @@ pub fn run(config: Config) -> ExitCode {
     app.activate();
     app.run();
     ExitCode::SUCCESS
+}
+
+/// Hides the title bar and its traffic lights, like WezTerm's
+/// `window_decorations = "RESIZE"`. The window keeps its title for Mission
+/// Control and window managers.
+pub(super) fn hide_titlebar(window: &NSWindow) {
+    window.setTitlebarAppearsTransparent(true);
+    window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
+    for button in [NSWindowButton::CloseButton, NSWindowButton::MiniaturizeButton, NSWindowButton::ZoomButton] {
+        if let Some(button) = window.standardWindowButton(button) {
+            button.setHidden(true);
+        }
+    }
+    // The empty title bar strip would still take clicks on the top rows to
+    // drag the window. AppKit has no public switch for it, so hide its view.
+    let frame = window.contentView().and_then(|view| unsafe { view.superview() });
+    for view in frame.map(|frame| frame.subviews()).iter().flat_map(|views| views.iter()) {
+        if view.class().name() == c"NSTitlebarContainerView" {
+            view.setHidden(true);
+        }
+    }
 }
 
 fn main_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
