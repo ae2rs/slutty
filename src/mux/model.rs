@@ -9,20 +9,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::pane::{Pane, PaneInfo, Wake};
+use super::tree::{Axis, Direction, Layout, Rect};
 use super::window::{Tab, Window};
 use super::{PaneId, WindowId};
 use crate::config::Config;
 use crate::terminal::{Frame, Geometry};
-
-/// A pane's place in its window, in cells from the top-left of the pane
-/// area.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Rect {
-    pub x: u16,
-    pub y: u16,
-    pub cols: u16,
-    pub rows: u16,
-}
 
 /// What changed since the last pump, for the windows to show.
 #[derive(Debug, Default)]
@@ -41,6 +32,13 @@ pub struct Pump {
 pub struct TabView<'a> {
     pub active: bool,
     pub info: &'a PaneInfo,
+}
+
+/// The panes on screen in a window, with their place in cells and what to
+/// draw, and the dividers between them.
+pub struct Visible<'a> {
+    pub panes: Vec<(PaneId, Rect, RefMut<'a, Frame>)>,
+    pub dividers: Vec<(Axis, Rect)>,
 }
 
 pub struct Mux {
@@ -62,15 +60,15 @@ impl Mux {
     pub fn open_window(&mut self, size: Geometry, config: &Config, cwd: Option<&Path>) -> io::Result<WindowId> {
         let pane = self.spawn(size, config, cwd)?;
         let id = WindowId(self.next_id());
-        self.windows.insert(id, Window::new(Tab { pane }, size));
+        self.windows.insert(id, Window::new(Tab::new(pane), size));
         Ok(id)
     }
 
     /// Closes a window and everything running in it.
     pub fn close_window(&mut self, window: WindowId) {
         if let Some(w) = self.windows.remove(&window) {
-            for tab in w.tabs() {
-                self.panes.remove(&tab.pane);
+            for pane in w.tabs().iter().flat_map(|tab| tab.tree.panes()) {
+                self.panes.remove(&pane);
             }
         }
     }
@@ -79,13 +77,9 @@ impl Mux {
     pub fn new_tab(&mut self, window: WindowId, config: &Config) -> io::Result<()> {
         let Some(w) = self.windows.get(&window) else { return Ok(()) };
         let size = w.size;
-        let cwd = self.panes.get(&w.active_tab().pane).and_then(|p| p.info().cwd.clone());
+        let cwd = self.cwd(w.active_tab().active);
         let pane = self.spawn(size, config, cwd.as_deref())?;
-        let focused = self.blur(window);
-        if let Some(w) = self.windows.get_mut(&window) {
-            w.push(Tab { pane });
-        }
-        self.refocus(window, focused);
+        self.change_focus(window, |w| w.push(Tab::new(pane)));
         Ok(())
     }
 
@@ -98,11 +92,9 @@ impl Mux {
     }
 
     pub fn activate_tab(&mut self, window: WindowId, index: usize) {
-        let focused = self.blur(window);
-        if let Some(w) = self.windows.get_mut(&window) {
+        self.change_focus(window, |w| {
             w.activate(index);
-        }
-        self.refocus(window, focused);
+        });
     }
 
     pub fn tabs(&self, window: WindowId) -> Vec<TabView<'_>> {
@@ -110,41 +102,128 @@ impl Mux {
         w.tabs()
             .iter()
             .enumerate()
-            .filter_map(|(i, tab)| Some(TabView { active: i == w.active(), info: self.panes.get(&tab.pane)?.info() }))
+            .filter_map(|(i, tab)| Some(TabView { active: i == w.active(), info: self.panes.get(&tab.active)?.info() }))
             .collect()
+    }
+
+    /// Splits the active pane, starting a shell in its directory in the new
+    /// half, which becomes active.
+    pub fn split(&mut self, window: WindowId, axis: Axis, config: &Config) -> io::Result<()> {
+        let Some(w) = self.windows.get(&window) else { return Ok(()) };
+        let active = w.active_tab().active;
+        let cwd = self.cwd(active);
+        let pane = self.spawn(w.size, config, cwd.as_deref())?;
+        self.change_focus(window, |w| {
+            let tab = w.active_tab_mut();
+            tab.zoomed = false;
+            tab.tree.split(active, pane, axis);
+            tab.active = pane;
+        });
+        self.fit_tab(window, None);
+        Ok(())
+    }
+
+    /// Closes the active pane, and its tab with it when it was the last.
+    /// Returns whether the window is now empty and gone.
+    pub fn close_pane(&mut self, window: WindowId) -> bool {
+        match self.active_pane(window) {
+            Some(pane) => self.remove_pane(window, pane),
+            None => false,
+        }
+    }
+
+    /// Makes `pane` active, if it is in the window's active tab.
+    pub fn activate_pane(&mut self, window: WindowId, pane: PaneId) {
+        self.change_focus(window, |w| {
+            let tab = w.active_tab_mut();
+            if tab.tree.contains(pane) && tab.active != pane {
+                tab.active = pane;
+                tab.zoomed = false;
+            }
+        });
+        self.fit_tab(window, None);
+    }
+
+    /// Makes the pane next to the active one in `direction` active.
+    pub fn focus_direction(&mut self, window: WindowId, direction: Direction) {
+        let Some(w) = self.windows.get(&window) else { return };
+        let tab = w.active_tab();
+        if let Some(pane) = tab.tree.neighbour(w.area(), tab.active, direction) {
+            self.activate_pane(window, pane);
+        }
+    }
+
+    /// Moves the divider nearest the active pane by `cells`.
+    pub fn resize_pane(&mut self, window: WindowId, direction: Direction, cells: u16) {
+        let Some(w) = self.windows.get_mut(&window) else { return };
+        let area = w.area();
+        let tab = w.active_tab_mut();
+        if tab.zoomed {
+            return;
+        }
+        let active = tab.active;
+        tab.tree.resize(area, active, direction, cells);
+        self.fit_tab(window, None);
+    }
+
+    pub fn toggle_zoom(&mut self, window: WindowId) {
+        let Some(w) = self.windows.get_mut(&window) else { return };
+        let tab = w.active_tab_mut();
+        tab.zoomed = !tab.zoomed && tab.tree.panes().len() > 1;
+        self.fit_tab(window, None);
+    }
+
+    pub fn rotate_panes(&mut self, window: WindowId) {
+        let Some(w) = self.windows.get_mut(&window) else { return };
+        w.active_tab_mut().tree.rotate_clockwise();
+        self.fit_tab(window, None);
     }
 
     /// The pane keys and pastes go to.
     pub fn active_pane(&self, window: WindowId) -> Option<PaneId> {
-        Some(self.windows.get(&window)?.active_tab().pane)
+        Some(self.windows.get(&window)?.active_tab().active)
+    }
+
+    /// Whether closing the active pane would stop something other than a
+    /// shell.
+    pub fn active_pane_busy(&self, window: WindowId) -> bool {
+        self.active_pane(window).and_then(|id| self.panes.get(&id)).is_some_and(Pane::is_busy)
     }
 
     /// Whether closing the active tab would stop something other than a
-    /// shell.
+    /// shell in any of its panes.
     pub fn active_tab_busy(&self, window: WindowId) -> bool {
-        self.active_pane(window).and_then(|id| self.panes.get(&id)).is_some_and(Pane::is_busy)
+        let Some(w) = self.windows.get(&window) else { return false };
+        w.active_tab().tree.panes().iter().filter_map(|id| self.panes.get(id)).any(Pane::is_busy)
     }
 
     pub fn pane_mut(&mut self, id: PaneId) -> Option<&mut Pane> {
         self.panes.get_mut(&id)
     }
 
-    /// The panes on screen in `window`, with their place and what to draw.
-    pub fn visible(&mut self, window: WindowId) -> Vec<(PaneId, Rect, RefMut<'_, Frame>)> {
-        let Some(w) = self.windows.get(&window) else { return Vec::new() };
-        let rect = Rect { x: 0, y: 0, cols: w.size.cols, rows: w.size.rows };
-        let pane = w.active_tab().pane;
-        self.panes.iter_mut().filter(|(id, _)| **id == pane).map(|(id, p)| (*id, rect, p.frame())).collect()
+    /// Where the panes of the window's active tab are, in cells.
+    pub fn layout(&self, window: WindowId) -> Layout {
+        self.windows.get(&window).map(|w| w.active_tab().layout(w.area())).unwrap_or_default()
+    }
+
+    pub fn visible(&mut self, window: WindowId) -> Visible<'_> {
+        let Layout { panes, dividers } = self.layout(window);
+        let mut frames: BTreeMap<PaneId, RefMut<'_, Frame>> = self
+            .panes
+            .iter_mut()
+            .filter(|(id, _)| panes.iter().any(|(p, _)| p == *id))
+            .map(|(id, pane)| (*id, pane.frame()))
+            .collect();
+        let panes = panes.into_iter().filter_map(|(id, rect)| Some((id, rect, frames.remove(&id)?))).collect();
+        Visible { panes, dividers }
     }
 
     /// Fits every tab of `window` to `size`.
     pub fn resize(&mut self, window: WindowId, size: Geometry) {
         let Some(w) = self.windows.get_mut(&window) else { return };
         w.size = size;
-        for tab in w.tabs() {
-            if let Some(pane) = self.panes.get_mut(&tab.pane) {
-                pane.resize(size);
-            }
+        for index in 0..w.tabs().len() {
+            self.fit_tab(window, Some(index));
         }
     }
 
@@ -152,7 +231,7 @@ impl Mux {
     pub fn focus(&mut self, window: WindowId, focused: bool) {
         let Some(w) = self.windows.get_mut(&window) else { return };
         w.focused = focused;
-        let pane = w.active_tab().pane;
+        let pane = w.active_tab().active;
         if let Some(pane) = self.panes.get_mut(&pane) {
             pane.focus(focused);
         }
@@ -178,7 +257,7 @@ impl Mux {
             let pumped = pane.pump(&mut self.buf);
             pump.more |= pumped.more;
             let Some((window, w)) = self.windows.iter().find(|(_, w)| w.position(id).is_some()) else { continue };
-            if pumped.output && w.active_tab().pane == id {
+            if pumped.output && w.active_tab().tree.contains(id) {
                 pump.redraw.insert(*window);
             }
             if pumped.info_changed {
@@ -189,43 +268,80 @@ impl Mux {
             }
         }
         for (window, pane) in closed {
-            let Some(index) = self.windows.get(&window).and_then(|w| w.position(pane)) else { continue };
             pump.redraw.insert(window);
             pump.tabs.insert(window);
-            if self.remove_tab(window, index) {
+            if self.remove_pane(window, pane) {
                 pump.closed.push(window);
             }
         }
         pump
     }
 
+    /// Returns whether the window is now empty and gone.
+    fn remove_pane(&mut self, window: WindowId, pane: PaneId) -> bool {
+        let Some(index) = self.windows.get(&window).and_then(|w| w.position(pane)) else { return false };
+        let mut removed = false;
+        self.change_focus(window, |w| {
+            let tab = w.tab_mut(index);
+            if let Some(next) = tab.tree.remove(pane) {
+                removed = true;
+                tab.zoomed = false;
+                if tab.active == pane {
+                    tab.active = next;
+                }
+            }
+        });
+        if !removed {
+            return self.remove_tab(window, index);
+        }
+        self.panes.remove(&pane);
+        self.fit_tab(window, Some(index));
+        false
+    }
+
     fn remove_tab(&mut self, window: WindowId, index: usize) -> bool {
-        let focused = self.blur(window);
-        let Some(w) = self.windows.get_mut(&window) else { return false };
-        let (tab, empty) = w.remove(index);
-        self.panes.remove(&tab.pane);
+        let mut removed = None;
+        self.change_focus(window, |w| removed = Some(w.remove(index)));
+        let Some((tab, empty)) = removed else { return false };
+        for pane in tab.tree.panes() {
+            self.panes.remove(&pane);
+        }
         if empty {
             self.windows.remove(&window);
-        } else {
-            self.refocus(window, focused);
         }
         empty
     }
 
-    /// Takes focus from the active pane before it changes. Returns whether
-    /// the window had it.
-    fn blur(&mut self, window: WindowId) -> bool {
-        let focused = self.windows.get(&window).is_some_and(|w| w.focused);
+    /// Changes which pane is active through `f`, moving the keyboard focus
+    /// along when the window has it.
+    fn change_focus(&mut self, window: WindowId, f: impl FnOnce(&mut Window)) {
+        let Some(w) = self.windows.get(&window) else { return };
+        let focused = w.focused;
         if focused {
             self.focus(window, false);
         }
-        focused
-    }
-
-    fn refocus(&mut self, window: WindowId, focused: bool) {
-        if focused {
+        let Some(w) = self.windows.get_mut(&window) else { return };
+        f(w);
+        if focused && !w.tabs().is_empty() {
             self.focus(window, true);
         }
+    }
+
+    /// Fits the panes of tab `index`, or of the active tab, to their place.
+    fn fit_tab(&mut self, window: WindowId, index: Option<usize>) {
+        let Some(w) = self.windows.get(&window) else { return };
+        let tab = &w.tabs()[index.unwrap_or(w.active())];
+        let size = w.size;
+        // A zoomed tab's hidden panes keep their size.
+        for (id, rect) in tab.layout(w.area()).panes {
+            if let Some(pane) = self.panes.get_mut(&id) {
+                pane.resize(Geometry { cols: rect.cols.max(1), rows: rect.rows.max(1), ..size });
+            }
+        }
+    }
+
+    fn cwd(&self, pane: PaneId) -> Option<std::path::PathBuf> {
+        self.panes.get(&pane).and_then(|p| p.info().cwd.clone())
     }
 
     fn spawn(&mut self, size: Geometry, config: &Config, cwd: Option<&Path>) -> io::Result<PaneId> {
