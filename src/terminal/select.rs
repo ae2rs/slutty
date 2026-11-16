@@ -528,6 +528,14 @@ mod tests {
     }
 
     #[test]
+    fn programs_can_ask_for_notifications() {
+        let t = terminal("\x1b]9;done\x07\x1b]777;notify;rho;needs you\x1b\\");
+        let notifications: Vec<(String, String)> =
+            t.take_notifications().into_iter().map(|n| (n.title, n.body)).collect();
+        assert_eq!(notifications, [(String::new(), "done".to_owned()), ("rho".to_owned(), "needs you".to_owned())]);
+    }
+
+    #[test]
     fn programs_can_set_the_clipboard() {
         let t = terminal("\x1b]52;c;aGVsbG8=\x07");
         assert_eq!(t.take_clipboard().as_deref(), Some("hello"));

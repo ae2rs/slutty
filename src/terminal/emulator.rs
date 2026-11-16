@@ -87,6 +87,15 @@ pub(super) struct Shared {
     selection_colors: Cell<SelectionColors>,
     /// Text the program asked to put on the clipboard (OSC 52).
     clipboard: RefCell<Option<String>>,
+    notifications: RefCell<Vec<Notification>>,
+}
+
+/// A desktop notification a program asked for (OSC 9, OSC 777).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notification {
+    /// Empty when the program gave none, as with OSC 9.
+    pub title: String,
+    pub body: String,
 }
 
 impl Shared {
@@ -133,6 +142,7 @@ impl Terminal {
             geometry: Cell::new(geometry),
             full_redraw: Cell::new(false),
             clipboard: RefCell::new(None),
+            notifications: RefCell::new(Vec::new()),
             selection_colors: Cell::new(SelectionColors::new(&config.theme)),
         });
 
@@ -189,6 +199,14 @@ impl Terminal {
                     }
                     None => write.reply(Err(ClipboardWriteError::Unsupported), false),
                 }
+            }
+        })?
+        .on_desktop_notification({
+            let shared = Rc::clone(&shared);
+            move |_, notification| {
+                let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+                let (title, body) = (text(notification.title()), text(notification.body()));
+                shared.notifications.borrow_mut().push(Notification { title, body });
             }
         })?
         .on_device_attributes(|_| Some(device_attributes()))?
@@ -248,6 +266,11 @@ impl Terminal {
         let vars = self.user_vars.feed(data);
         self.vt.vt_write(data);
         vars
+    }
+
+    /// The notifications asked for since the last call.
+    pub fn take_notifications(&self) -> Vec<Notification> {
+        std::mem::take(&mut self.shared.notifications.borrow_mut())
     }
 
     /// Text the program last put on the clipboard, once.

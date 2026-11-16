@@ -6,6 +6,6 @@ mod frame;
 mod select;
 mod user_vars;
 
-pub use emulator::{Geometry, KeyInput, MouseInput, Terminal};
+pub use emulator::{Geometry, KeyInput, MouseInput, Notification, Terminal};
 pub use frame::{Cell, CellStyle, Cursor, CursorShape, Frame, Grapheme, Row};
 pub use select::{Highlight, Pointer, Release, SearchStatus};
