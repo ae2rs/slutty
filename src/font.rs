@@ -7,17 +7,20 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 
 use objc2_core_foundation::{
-    CFAttributedString, CFData, CFDictionary, CFRetained, CFString, CFType, CGFloat, kCFBooleanTrue,
+    CFArray, CFAttributedString, CFData, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGFloat, kCFBooleanTrue,
 };
 use objc2_core_graphics::{CGBitmapContextCreate, CGColorSpace, CGContext, CGImageAlphaInfo, kCGColorSpaceSRGB};
 use objc2_core_text::{
-    CTFont, CTFontManagerCreateFontDescriptorFromData, CTFontOrientation, CTLine, kCTFontAttributeName,
-    kCTForegroundColorFromContextAttributeName,
+    CTFont, CTFontDescriptor, CTFontManagerCreateFontDescriptorFromData, CTFontOrientation, CTFontSymbolicTraits, CTLine,
+    kCTFontAttributeName, kCTFontFamilyNameAttribute, kCTFontWeightTrait, kCTForegroundColorFromContextAttributeName,
 };
 
-/// Embedded JetBrains Mono, bold as SemiBold and faint as ExtraLight, like
-/// the WezTerm config.
-const FACES: [&[u8]; 6] = [
+use crate::config::{self, FontWeight};
+
+/// The family slutty embeds, so it looks the same on every Mac.
+const EMBEDDED_FAMILY: &str = "JetBrains Mono";
+
+const EMBEDDED: [&[u8]; 6] = [
     include_bytes!("../assets/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf"),
     include_bytes!("../assets/fonts/jetbrains-mono/JetBrainsMono-Italic.ttf"),
     include_bytes!("../assets/fonts/jetbrains-mono/JetBrainsMono-SemiBold.ttf"),
@@ -65,39 +68,52 @@ pub struct Bitmap {
 }
 
 #[derive(Debug)]
-pub struct FontError(&'static str);
+pub struct FontError(String);
 
 impl std::fmt::Display for FontError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
+        f.write_str(&self.0)
     }
 }
 
 impl std::error::Error for FontError {}
 
 pub struct Fonts {
+    /// Indexed by [`face_index`].
     faces: Vec<CFRetained<CTFont>>,
     metrics: Metrics,
     color_space: CFRetained<CGColorSpace>,
 }
 
 impl Fonts {
-    /// Loads the faces at `size` device pixels.
-    pub fn new(size: f64) -> Result<Self, FontError> {
-        let faces = FACES
-            .iter()
-            .map(|bytes| {
-                let data = CFData::from_bytes(bytes);
-                // SAFETY: `data` is a valid CFData.
-                let descriptor = unsafe { CTFontManagerCreateFontDescriptorFromData(&data) }
-                    .ok_or(FontError("embedded font is invalid"))?;
-                // SAFETY: valid descriptor; a null matrix means identity.
-                Ok(unsafe { CTFont::with_font_descriptor(&descriptor, size, std::ptr::null()) })
-            })
-            .collect::<Result<Vec<_>, FontError>>()?;
-        let color_space =
-            CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB })).ok_or(FontError("no sRGB color space"))?;
-        let metrics = metrics(&faces[0])?;
+    /// Loads the configured family at `size` device pixels, with the faces
+    /// nearest to each configured weight.
+    pub fn new(config: &config::Font, size: f64) -> Result<Self, FontError> {
+        let candidates = if config.family.eq_ignore_ascii_case(EMBEDDED_FAMILY) {
+            embedded(size)?
+        } else {
+            installed(&config.family, size)
+        };
+        if candidates.is_empty() {
+            return Err(FontError(format!("font family `{}` is not installed", config.family)));
+        }
+        let pick = |weight: FontWeight, italic: bool| {
+            let want = css_weight(weight);
+            let cost = |(css, slanted): &(f64, bool)| (css - want).abs() + if *slanted == italic { 0.0 } else { 1000.0 };
+            let best = candidates.iter().min_by(|a, b| cost(&a.1).total_cmp(&cost(&b.1))).expect("not empty");
+            best.0.clone()
+        };
+        let faces = vec![
+            pick(FontWeight::Regular, false),
+            pick(FontWeight::Regular, true),
+            pick(config.bold_weight, false),
+            pick(config.bold_weight, true),
+            pick(config.faint_weight, false),
+            pick(config.faint_weight, true),
+        ];
+        let color_space = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }))
+            .ok_or_else(|| FontError("no sRGB color space".into()))?;
+        let metrics = metrics(&faces[0], config.line_height)?;
         Ok(Self { faces, metrics, color_space })
     }
 
@@ -169,13 +185,91 @@ fn face_index(face: Face) -> usize {
     weight + usize::from(face.italic)
 }
 
-fn metrics(font: &CTFont) -> Result<Metrics, FontError> {
+/// The embedded faces, each with its weight and slant.
+fn embedded(size: f64) -> Result<Vec<(CFRetained<CTFont>, (f64, bool))>, FontError> {
+    EMBEDDED
+        .iter()
+        .map(|bytes| {
+            let data = CFData::from_bytes(bytes);
+            // SAFETY: `data` is a valid CFData.
+            let descriptor = unsafe { CTFontManagerCreateFontDescriptorFromData(&data) }
+                .ok_or_else(|| FontError("embedded font is invalid".into()))?;
+            Ok(with_style(&descriptor, size))
+        })
+        .collect()
+}
+
+/// Every installed face of `family`.
+fn installed(family: &str, size: f64) -> Vec<(CFRetained<CTFont>, (f64, bool))> {
+    let name = CFString::from_str(family);
+    // SAFETY: reading a framework constant.
+    let key = unsafe { kCTFontFamilyNameAttribute };
+    let attributes = CFDictionary::<CFString, CFString>::from_slices(&[key], &[&name]);
+    // SAFETY: a valid attribute dictionary.
+    let query = unsafe { CTFontDescriptor::with_attributes(attributes.as_opaque()) };
+    // SAFETY: no mandatory attributes; the array holds font descriptors.
+    let Some(found) = (unsafe { query.matching_font_descriptors(None) }) else { return Vec::new() };
+    let found = unsafe { CFRetained::cast_unchecked::<CFArray<CTFontDescriptor>>(found) };
+    found.iter().map(|descriptor| with_style(&descriptor, size)).collect()
+}
+
+/// A font from `descriptor`, with its weight as CSS (400 regular, 700 bold)
+/// and whether it is italic.
+fn with_style(descriptor: &CTFontDescriptor, size: f64) -> (CFRetained<CTFont>, (f64, bool)) {
+    // SAFETY: valid descriptor; a null matrix means identity.
+    let font = unsafe { CTFont::with_font_descriptor(descriptor, size, std::ptr::null()) };
+    // SAFETY: plain getters; the traits dictionary maps names to numbers.
+    let (symbolic, traits) = unsafe { (font.symbolic_traits(), font.traits()) };
+    let traits = unsafe { CFRetained::cast_unchecked::<CFDictionary<CFString, CFNumber>>(traits) };
+    let weight = traits.get(unsafe { kCTFontWeightTrait }).and_then(|n| n.as_cgfloat()).unwrap_or(0.0);
+    (font, (ct_to_css(weight), symbolic.contains(CTFontSymbolicTraits::ItalicTrait)))
+}
+
+/// CoreText weights (-1 to 1) against CSS weights, from AppKit's NSFontWeight.
+const WEIGHTS: [(f64, f64); 9] = [
+    (-0.8, 100.0),
+    (-0.6, 200.0),
+    (-0.4, 300.0),
+    (0.0, 400.0),
+    (0.23, 500.0),
+    (0.3, 600.0),
+    (0.4, 700.0),
+    (0.56, 800.0),
+    (0.62, 900.0),
+];
+
+fn ct_to_css(weight: f64) -> f64 {
+    let (first, last) = (WEIGHTS[0], WEIGHTS[WEIGHTS.len() - 1]);
+    if weight <= first.0 {
+        return first.1;
+    }
+    WEIGHTS
+        .windows(2)
+        .find(|w| weight <= w[1].0)
+        .map_or(last.1, |w| w[0].1 + (weight - w[0].0) / (w[1].0 - w[0].0) * (w[1].1 - w[0].1))
+}
+
+fn css_weight(weight: FontWeight) -> f64 {
+    match weight {
+        FontWeight::Thin => 100.0,
+        FontWeight::Extralight => 200.0,
+        FontWeight::Light => 300.0,
+        FontWeight::Regular => 400.0,
+        FontWeight::Medium => 500.0,
+        FontWeight::Demibold => 600.0,
+        FontWeight::Bold => 700.0,
+        FontWeight::Extrabold => 800.0,
+        FontWeight::Black => 900.0,
+    }
+}
+
+fn metrics(font: &CTFont, line_height: f64) -> Result<Metrics, FontError> {
     let mut chars = [u16::from(b'M')];
     let mut glyphs = [0u16];
     // SAFETY: both buffers hold one element.
     let found = unsafe { font.glyphs_for_characters(NonNull::from(&mut chars[0]), NonNull::from(&mut glyphs[0]), 1) };
     if !found {
-        return Err(FontError("font has no 'M'"));
+        return Err(FontError("font has no 'M'".into()));
     }
     // SAFETY: one glyph in; a null advances pointer is allowed.
     let advance = unsafe {
@@ -186,8 +280,10 @@ fn metrics(font: &CTFont) -> Result<Metrics, FontError> {
         (font.ascent(), font.descent(), font.leading(), font.underline_position(), font.underline_thickness())
     };
     let px = |v: f64| v.round().max(1.0) as u32;
-    let baseline = px(ascent);
-    let cell_height = px(ascent + descent + leading);
+    let natural = ascent + descent + leading;
+    let cell_height = px(natural * line_height);
+    // Extra line height is shared above and below the text.
+    let baseline = px(ascent + (f64::from(cell_height) - natural) / 2.0);
     Ok(Metrics {
         cell_width: px(advance),
         cell_height,
@@ -230,10 +326,11 @@ fn crop(data: &[u8], width: usize, height: usize) -> Option<(usize, usize, usize
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Font;
 
     #[test]
     fn metrics_are_monospace_cells() {
-        let fonts = Fonts::new(32.0).expect("fonts");
+        let fonts = Fonts::new(&crate::config::Font::default(), 32.0).expect("fonts");
         let m = fonts.metrics();
         assert!((15..=25).contains(&m.cell_width), "{m:?}");
         assert!(m.cell_height > m.cell_width && m.baseline < m.cell_height, "{m:?}");
@@ -241,7 +338,7 @@ mod tests {
 
     #[test]
     fn text_is_white_and_emoji_is_colored() {
-        let fonts = Fonts::new(32.0).expect("fonts");
+        let fonts = Fonts::new(&crate::config::Font::default(), 32.0).expect("fonts");
         let a = fonts.rasterize("a", Face::default(), 1).expect("ink");
         assert!(!a.colored && a.width > 0 && a.height > 0);
         assert!(fonts.rasterize(" ", Face::default(), 1).is_none());
@@ -251,10 +348,51 @@ mod tests {
 
     #[test]
     fn faces_differ() {
-        let fonts = Fonts::new(32.0).expect("fonts");
+        let fonts = Fonts::new(&crate::config::Font::default(), 32.0).expect("fonts");
         let ink = |face| fonts.rasterize("m", face, 1).expect("ink").data.iter().map(|&b| u64::from(b)).sum::<u64>();
         let regular = ink(Face::default());
         assert!(ink(Face { weight: Weight::Bold, italic: false }) > regular);
         assert!(ink(Face { weight: Weight::Faint, italic: false }) < regular);
+    }
+
+    #[test]
+    fn weights_pick_the_nearest_embedded_face() {
+        let ink = |config: &Font, weight| {
+            let fonts = Fonts::new(config, 32.0).expect("fonts");
+            let bitmap = fonts.rasterize("m", Face { weight, italic: false }, 1).expect("ink");
+            bitmap.data.iter().map(|&b| u64::from(b)).sum::<u64>()
+        };
+        let regular = ink(&Font::default(), Weight::Regular);
+        let plain = Font { bold_weight: FontWeight::Regular, faint_weight: FontWeight::Medium, ..Font::default() };
+        assert_eq!(ink(&plain, Weight::Bold), regular);
+        assert_eq!(ink(&plain, Weight::Faint), regular);
+        let heavy = Font { bold_weight: FontWeight::Black, ..Font::default() };
+        assert_eq!(ink(&heavy, Weight::Bold), ink(&Font::default(), Weight::Bold));
+    }
+
+    #[test]
+    fn line_height_adds_room_on_both_sides() {
+        let normal = Fonts::new(&Font::default(), 32.0).expect("fonts").metrics();
+        let tall = Fonts::new(&Font { line_height: 1.5, ..Font::default() }, 32.0).expect("fonts").metrics();
+        assert!(tall.cell_height > normal.cell_height + 10, "{tall:?}");
+        assert!(tall.baseline > normal.baseline && tall.baseline < tall.cell_height, "{tall:?}");
+    }
+
+    #[test]
+    fn installed_families_load_and_missing_ones_fail() {
+        let menlo = Font { family: "Menlo".into(), ..Font::default() };
+        assert!(Fonts::new(&menlo, 32.0).is_ok());
+        let missing = Font { family: "No Such Font 42".into(), ..Font::default() };
+        let err = Fonts::new(&missing, 32.0).err().expect("missing");
+        assert!(err.to_string().contains("No Such Font 42"), "{err}");
+    }
+
+    #[test]
+    fn coretext_weights_map_to_css() {
+        assert_eq!(ct_to_css(0.0), 400.0);
+        assert_eq!(ct_to_css(0.4), 700.0);
+        assert_eq!(ct_to_css(-1.0), 100.0);
+        assert_eq!(ct_to_css(1.0), 900.0);
+        assert!((ct_to_css(0.115) - 450.0).abs() < 1.0);
     }
 }

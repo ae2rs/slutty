@@ -48,7 +48,7 @@ pub fn run(config: Config) -> ExitCode {
     app.setMainMenu(Some(&main_menu(mtm)));
 
     let scale = NSScreen::mainScreen(mtm).map_or(2.0, |s| s.backingScaleFactor());
-    let renderer = match Fonts::new(config.font.size * scale)
+    let renderer = match Fonts::new(&config.font, config.font.size * scale)
         .map_err(|e| e.to_string())
         .and_then(|fonts| Renderer::new(fonts).map_err(|e| e.to_string()))
     {
