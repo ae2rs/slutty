@@ -324,6 +324,18 @@ Each milestone is one PR. Each must keep the idle rule: no work while nothing ch
 
 WezTerm parity for my use is reached after M7.
 
+### Parity check
+
+Every Keep row above is built, and the bindings match `keys.lua` and `rho.lua`. Known differences:
+
+- Inactive panes are darkened to 80% brightness but not desaturated (WezTerm: saturation 0.9).
+- The tab bar keeps the active colors when the window loses focus; WezTerm's `window_frame` greys it.
+- A hovered tab does not turn aqua.
+- Search is plain text, with no regex mode.
+- The working star is steady, not pulsing (decided above).
+
+Each milestone's GUI checks still run in a batch before its merge.
+
 ## Config
 
 Declarative TOML. No scripting. Implemented in M2; the MVP hardcodes the defaults below.
