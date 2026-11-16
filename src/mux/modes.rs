@@ -122,6 +122,8 @@ impl Pane {
             }
             (false, KeyName::Down | KeyName::PageDown) | (true, KeyName::Char('n')) => self.terminal.search_step(false),
             (true, KeyName::Char('u')) => self.terminal.search(""),
+            // WezTerm's CycleMatchType; libghostty's text search ignores case.
+            (true, KeyName::Char('r')) => self.terminal.toggle_search_regex(),
             (false, KeyName::Backspace) => {
                 let mut needle = needle;
                 needle.pop();

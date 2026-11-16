@@ -265,6 +265,9 @@ impl Terminal {
     pub fn write(&mut self, data: &[u8]) -> Vec<(String, String)> {
         let vars = self.user_vars.feed(data);
         self.vt.vt_write(data);
+        if let Some(searching) = &mut self.searching {
+            searching.output_arrived();
+        }
         vars
     }
 

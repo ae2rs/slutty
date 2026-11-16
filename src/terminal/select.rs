@@ -19,6 +19,7 @@ use libghostty_vt::terminal::ScrollViewport;
 
 use super::copy_mode::{self, Command, CopyMode, Pos};
 use super::emulator::Terminal;
+use super::regex_search::{RegexSearch, Span};
 
 /// macOS's default double-click interval.
 const MULTI_CLICK: Duration = Duration::from_millis(500);
@@ -59,6 +60,10 @@ pub struct SearchStatus {
     /// The match moved to, counting from 1.
     pub current: Option<usize>,
     pub total: usize,
+    /// The needle is a regex rather than text.
+    pub regex: bool,
+    /// The needle is a regex that does not parse.
+    pub invalid: bool,
 }
 
 /// The mouse selection gesture and its reusable events.
@@ -88,9 +93,28 @@ impl Selector {
 
 /// The search and the needle it looks for.
 pub(super) struct Searching {
-    search: Search<'static, 'static>,
     needle: String,
-    matches: MatchBuffer,
+    by: By,
+}
+
+impl Searching {
+    pub fn output_arrived(&mut self) {
+        if let By::Regex(regex) = &mut self.by {
+            regex.output_arrived();
+        }
+    }
+}
+
+/// How a search matches: libghostty's text search, or a regex.
+enum By {
+    Text { search: Search<'static, 'static>, matches: MatchBuffer },
+    Regex(RegexSearch),
+}
+
+impl By {
+    fn text(vt: &mut libghostty_vt::Terminal<'static, 'static>) -> Result<Self> {
+        Ok(Self::Text { search: Search::new(vt)?, matches: MatchBuffer::new() })
+    }
 }
 
 impl Terminal {
@@ -284,51 +308,85 @@ impl Terminal {
             Ok(())
         })();
         self.selection_changed(result);
-        if let Ok(bar) = self.vt.scrollbar() {
-            let (top, rows) = (bar.offset as u32, bar.len as u32);
-            if cursor.y < top {
-                self.vt.scroll_viewport(ScrollViewport::Row(cursor.y as usize));
-            } else if cursor.y >= top + rows {
-                self.vt.scroll_viewport(ScrollViewport::Row((cursor.y + 1 - rows) as usize));
+        self.scroll_into_view(cursor.y);
+        self.shared.full_redraw.set(true);
+    }
+
+    /// Scrolls the viewport the least that shows screen row `y`.
+    fn scroll_into_view(&mut self, y: u32) {
+        let Ok(bar) = self.vt.scrollbar() else { return };
+        let (top, rows) = (bar.offset as u32, bar.len as u32);
+        if y < top {
+            self.vt.scroll_viewport(ScrollViewport::Row(y as usize));
+        } else if y >= top + rows {
+            self.vt.scroll_viewport(ScrollViewport::Row((y + 1 - rows) as usize));
+        }
+    }
+
+    /// Looks for `needle` and moves to the newest match. An empty needle
+    /// keeps search open with nothing found. A new search looks for text.
+    pub fn search(&mut self, needle: &str) {
+        let result = (|| -> Result<Option<Span>> {
+            let searching = match &mut self.searching {
+                Some(searching) => searching,
+                None => self.searching.insert(Searching { needle: String::new(), by: By::text(&mut self.vt)? }),
+            };
+            searching.needle = needle.to_owned();
+            match &mut searching.by {
+                By::Text { search, .. } => {
+                    search.set_needle(&mut self.vt, needle.as_bytes())?;
+                    search.run(&mut self.vt)?;
+                    if !needle.is_empty() {
+                        search.select_next(&mut self.vt)?;
+                    }
+                    Ok(None)
+                }
+                By::Regex(regex) => {
+                    regex.set_pattern(&self.vt, needle);
+                    Ok(regex.current())
+                }
             }
+        })();
+        match result {
+            Ok(Some(span)) => self.scroll_into_view(span.row),
+            Ok(None) => {}
+            Err(err) => log::warn!("search failed: {err}"),
         }
         self.shared.full_redraw.set(true);
     }
 
-    /// Looks for `needle` and moves to the newest match. An empty needle
-    /// keeps search open with nothing found.
-    pub fn search(&mut self, needle: &str) {
-        let result = (|| -> Result<()> {
-            let searching = match &mut self.searching {
-                Some(searching) => searching,
-                None => self.searching.insert(Searching {
-                    search: Search::new(&mut self.vt)?,
-                    needle: String::new(),
-                    matches: MatchBuffer::new(),
-                }),
-            };
-            searching.needle = needle.to_owned();
-            searching.search.set_needle(&mut self.vt, needle.as_bytes())?;
-            searching.search.run(&mut self.vt)?;
-            if !needle.is_empty() {
-                searching.search.select_next(&mut self.vt)?;
-            }
-            Ok(())
-        })();
-        if let Err(err) = result {
-            log::warn!("search failed: {err}");
-        }
-        self.shared.full_redraw.set(true);
+    /// Switches the open search between text and a regex, keeping what it
+    /// looks for.
+    pub fn toggle_search_regex(&mut self) {
+        let Some(searching) = &mut self.searching else { return };
+        searching.by = match searching.by {
+            By::Text { .. } => By::Regex(RegexSearch::default()),
+            By::Regex(_) => match By::text(&mut self.vt) {
+                Ok(text) => text,
+                Err(err) => return log::warn!("search failed: {err}"),
+            },
+        };
+        let needle = searching.needle.clone();
+        self.search(&needle);
     }
 
     /// Moves to the next older match, or the next newer when `older` is not
     /// set, scrolling it into view.
     pub fn search_step(&mut self, older: bool) {
         let Some(searching) = &mut self.searching else { return };
-        let moved =
-            if older { searching.search.select_next(&mut self.vt) } else { searching.search.select_prev(&mut self.vt) };
-        if let Err(err) = moved {
-            log::warn!("moving to a match failed: {err}");
+        match &mut searching.by {
+            By::Text { search, .. } => {
+                let moved = if older { search.select_next(&mut self.vt) } else { search.select_prev(&mut self.vt) };
+                if let Err(err) = moved {
+                    log::warn!("moving to a match failed: {err}");
+                }
+            }
+            By::Regex(regex) => {
+                regex.refresh(&self.vt);
+                if let Some(span) = regex.step(older) {
+                    self.scroll_into_view(span.row);
+                }
+            }
         }
         self.shared.full_redraw.set(true);
     }
@@ -341,11 +399,22 @@ impl Terminal {
 
     pub fn search_status(&self) -> Option<SearchStatus> {
         let searching = self.searching.as_ref()?;
-        let search = &searching.search;
-        Some(SearchStatus {
-            needle: searching.needle.clone(),
-            current: search.selected_index().ok().flatten().map(|i| i + 1),
-            total: search.total_matches().unwrap_or(0),
+        let needle = searching.needle.clone();
+        Some(match &searching.by {
+            By::Text { search, .. } => SearchStatus {
+                needle,
+                current: search.selected_index().ok().flatten().map(|i| i + 1),
+                total: search.total_matches().unwrap_or(0),
+                regex: false,
+                invalid: false,
+            },
+            By::Regex(regex) => SearchStatus {
+                needle,
+                current: regex.position(),
+                total: regex.total(),
+                regex: true,
+                invalid: regex.invalid(),
+            },
         })
     }
 
@@ -354,12 +423,29 @@ impl Terminal {
     pub fn search_highlights(&mut self) -> Vec<Highlight> {
         let Some(searching) = &mut self.searching else { return Vec::new() };
         let geometry = self.shared.geometry.get();
+        let (search, matches) = match &mut searching.by {
+            By::Text { search, matches } => (search, matches),
+            By::Regex(regex) => {
+                regex.refresh(&self.vt);
+                let Ok(bar) = self.vt.scrollbar() else { return Vec::new() };
+                let top = bar.offset as u32;
+                return regex
+                    .visible(top, bar.len as u32)
+                    .map(|(span, current)| Highlight {
+                        row: (span.row - top) as u16,
+                        start: span.start,
+                        end: span.end,
+                        current,
+                    })
+                    .collect();
+            }
+        };
         let highlights = (|| -> Result<Vec<Highlight>> {
-            let snapshot = searching.search.snapshot(&mut self.vt)?;
+            let snapshot = search.snapshot(&mut self.vt)?;
             let vt = snapshot.terminal();
             let current = snapshot.selected_match()?;
             let mut out = Vec::new();
-            for found in snapshot.viewport_matches(&mut searching.matches)? {
+            for found in snapshot.viewport_matches(matches)? {
                 let is_current = match &current {
                     Some(current) => current.equals(vt, &found)?,
                     None => false,
@@ -518,6 +604,45 @@ mod tests {
         assert_eq!(t.search_status().and_then(|s| s.current), Some(2));
         t.close_search();
         assert_eq!(t.search_status(), None);
+    }
+
+    #[test]
+    fn regex_search_reaches_into_the_scrollback() {
+        // Four rows on screen; `id 0`..`id 2` scroll into the scrollback.
+        let mut t = terminal("id 0\r\nid 1\r\nid 2\r\nx\r\ny\r\nid 5\r\nz");
+        t.search("id");
+        t.toggle_search_regex();
+        t.search(r"id [0-2]");
+        let status = t.search_status().expect("open");
+        assert!(status.regex && !status.invalid);
+        assert_eq!((status.total, status.current), (3, Some(1)));
+        // The newest match, `id 2`, was scrolled into view at the top.
+        let highlights = t.search_highlights();
+        assert_eq!(highlights.iter().filter(|h| h.current).map(|h| (h.row, h.start, h.end)).next(), Some((0, 0, 4)));
+        t.search_step(true);
+        t.search_step(true);
+        assert_eq!(t.search_status().and_then(|s| s.current), Some(3));
+        let highlights = t.search_highlights();
+        assert!(highlights.iter().any(|h| h.current && h.row == 0), "`id 0` is in view");
+
+        t.search("id [");
+        let status = t.search_status().expect("open");
+        assert!(status.invalid);
+        assert_eq!(status.total, 0);
+        t.toggle_search_regex();
+        assert!(!t.search_status().expect("open").regex);
+    }
+
+    #[test]
+    fn regex_search_catches_up_with_new_output() {
+        let mut t = terminal("one");
+        t.search("");
+        t.toggle_search_regex();
+        t.search("o.e");
+        assert_eq!(t.search_status().map(|s| s.total), Some(1));
+        t.write(b" ole");
+        assert_eq!(t.search_highlights().len(), 2);
+        assert_eq!(t.search_status().map(|s| s.total), Some(2));
     }
 
     #[test]

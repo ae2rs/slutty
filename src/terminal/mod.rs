@@ -3,6 +3,7 @@
 pub mod copy_mode;
 mod emulator;
 mod frame;
+mod regex_search;
 mod select;
 mod user_vars;
 
