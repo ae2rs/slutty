@@ -312,3 +312,87 @@ Each milestone is one PR. Each must keep the idle rule: no work while nothing ch
 - Optional status widgets, off by default.
 
 WezTerm parity for my use is reached after M6.
+
+## Config
+
+Declarative TOML. No scripting. Implemented in M2; the MVP hardcodes the defaults below.
+
+### Principles
+
+- **One file**, `~/.config/slutty/slutty.toml`. Every key is optional; a missing key takes the default.
+- **Typed.** Parsed into Rust structs with `serde`. Unknown keys and bad values are errors that name the key and line.
+- **Never fatal.** A broken file keeps the last good config and shows the error in a banner.
+- **Live reload.** Watch the file with FSEvents. Reload on change, and on the reload key.
+- **Behaviour, not scripts.** What WezTerm needed Lua for (rho, tab titles) is built in and switched by keys.
+
+### Example: my WezTerm setup
+
+```toml
+[font]
+family = "JetBrains Mono"
+size = 16
+line_height = 1.0
+bold_weight = "demibold"
+faint_weight = "extralight"
+ligatures = true
+
+[theme]
+name = "tokyo-night"          # built in; [theme.colors] overrides single colors
+
+[window]
+decorations = "resize"         # "full" | "resize" | "none"
+padding = { left = "1cell", right = "1cell", top = 0, bottom = 0 }
+confirm_close = false
+
+[terminal]
+scrollback_lines = 100_000
+cursor = "bar"                 # "block" | "bar" | "underline"
+cursor_blink = false
+bell = "none"                  # "none" | "visual" | "sound"
+option_as_alt = "left"         # "none" | "left" | "right" | "both"
+
+[mouse]
+wheel_lines = 5
+
+[tab_bar]
+enabled = true
+max_width = 32
+title = ["rho", "index", "cwd"] # parts, in order
+
+[keys]
+leader = "ctrl+s"
+defaults = false               # start from an empty table, like disable_default_key_bindings
+
+[keys.bind]
+"leader v" = "split-right"
+"leader -" = "split-down"
+"leader t" = "new-tab"
+"cmd+t" = "new-tab"
+"cmd+w" = { action = "close-tab", confirm = true }
+"leader x" = { action = "close-pane", confirm = true }
+"cmd+1" = { action = "activate-tab", index = 1 }
+"leader h" = { action = "focus-pane", direction = "left" }
+"leader shift+h" = { action = "resize-pane", direction = "left", cells = 5 }
+"leader r" = { action = "key-table", name = "resize", sticky = true }
+"cmd+q" = { action = "quit", confirm = true }
+"cmd+left" = { action = "send", text = "\u001bOH" }
+"opt+left" = { action = "send", text = "\u001bb" }
+"cmd+backspace" = { action = "send-key", key = "ctrl+u" }
+
+[keys.tables.resize]
+"h" = { action = "resize-pane", direction = "left", cells = 1 }
+"escape" = "pop-table"
+```
+
+### Keys
+
+- A binding is a string of chords separated by spaces: `"leader v"`, `"cmd+shift+p"`.
+- `leader` is a chord name. It has no timeout unless `leader_timeout_ms` is set.
+- An action is a name, or a table with `action` and its arguments.
+- Several chords can share one action by listing the same action twice. No `{ "LEADER", "SUPER" }` lists: one key, one line.
+- Key tables are named sets. `sticky = true` keeps the table until `pop-table`.
+
+### Code layout
+
+- `config` holds the types, their `Default`, and the loader. Other modules take the typed structs and never see TOML.
+- Reload swaps an `Rc<Config>` on the main thread and marks every pane fully dirty.
