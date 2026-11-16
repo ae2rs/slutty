@@ -1,144 +1,57 @@
-//! The terminal view: input, IME, drawing and the wake-ups from PTY threads.
+//! A window's view: input, IME and drawing for the panes of one mux window.
 //!
-//! All state lives on the main thread. PTY reader threads only dispatch
-//! [`wake`] to the main queue; a display link that is paused while nothing
-//! changes paces the frames.
+//! The view keeps only what belongs to the window on screen; the mux, the
+//! renderer and the config are the app's ([`super::state`]). A display link
+//! that is paused while nothing changes paces the frames.
 
 use std::cell::{Cell, OnceCell, RefCell};
-use std::path::PathBuf;
-use std::time::Instant;
+use std::ops::Range;
 
-use dispatch2::{DispatchQueue, DispatchTime};
 use libghostty_vt::color::Rgb;
 use libghostty_vt::key::{self, Key, Mods};
 use libghostty_vt::mouse;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObjectProtocol, Sel};
+use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSEvent, NSEventModifierFlags, NSPasteboard, NSPasteboardTypeString, NSResponder, NSTextInputClient,
-    NSView, NSViewLayerContentsRedrawPolicy, NSWindowDelegate,
+    NSEvent, NSEventModifierFlags, NSResponder, NSTextInputClient, NSView, NSViewLayerContentsRedrawPolicy,
+    NSWindowDelegate,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound, NSNotification, NSObject, NSPoint, NSRange,
     NSRangePointer, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSUInteger,
 };
+use objc2_metal::MTLDevice;
 use objc2_quartz_core::{CADisplayLink, CALayer, CAMetalLayer, kCAGravityTopLeft};
 
 use super::keys;
-use super::watch::Watcher;
-use crate::config::{self, Config, OptionAsAlt, Padding};
-use crate::font::{Fonts, Metrics};
-use crate::keys::{Action, Matcher, Outcome};
-use crate::mux::{Event, Mux};
-use crate::renderer::{Line, Overlay, PIXEL_FORMAT, Renderer};
-use crate::terminal::{CellStyle, Geometry, KeyInput, MouseInput};
-
-thread_local! {
-    /// The window's view, for wake-ups that arrive through the main queue.
-    static VIEW: RefCell<Option<Retained<TerminalView>>> = const { RefCell::new(None) };
-}
-
-/// Runs on a PTY reader thread when output is waiting.
-pub fn wake_from_any_thread() {
-    DispatchQueue::main().exec_async(|| with_view(|view| view.pump()));
-}
-
-pub fn with_view(f: impl FnOnce(&TerminalView)) {
-    // Cloned out, so `f` may close the window, which clears VIEW.
-    if let Some(view) = VIEW.with(|v| v.borrow().clone()) {
-        f(&view);
-    }
-}
-
-/// The config in effect, where it came from, and why the file could not be
-/// used, if it could not.
-pub struct Settings {
-    pub config: Config,
-    pub path: Option<PathBuf>,
-    pub error: Option<String>,
-}
-
-struct State {
-    mux: Mux,
-    renderer: Renderer,
-    settings: Settings,
-    watcher: Option<Watcher>,
-    matcher: Matcher,
-    /// Key codes whose press a binding used, so their release is not sent.
-    swallowed: Vec<u16>,
-    /// In points; the font-size keys change it.
-    font_size: f64,
-    scale: f64,
-    focused: bool,
-    /// Fractions of a line left over from trackpad scrolling.
-    scroll_remainder: f64,
-}
-
-impl State {
-    fn config(&self) -> &Config {
-        &self.settings.config
-    }
-
-    /// Loads the fonts at the current size and scale. On failure the old ones
-    /// stay, and the banner says why.
-    fn load_fonts(&mut self) {
-        match Fonts::new(&self.settings.config.font, self.font_size * self.scale) {
-            Ok(fonts) => self.renderer.set_fonts(fonts),
-            Err(err) => {
-                log::error!("loading fonts failed: {err}");
-                self.settings.error = Some(err.to_string());
-            }
-        }
-    }
-
-    /// Applies a config read from the file. Returns whether anything changed.
-    fn reload(&mut self, loaded: Result<Config, String>) -> bool {
-        let new = match loaded {
-            Ok(new) => new,
-            Err(err) => {
-                let changed = self.settings.error.as_ref() != Some(&err);
-                if changed {
-                    log::error!("config: {err}");
-                }
-                self.settings.error = Some(err);
-                return changed;
-            }
-        };
-        let had_error = self.settings.error.take().is_some();
-        let old = std::mem::replace(&mut self.settings.config, new);
-        let new = &self.settings.config;
-        if *new == old {
-            return had_error;
-        }
-        log::info!("config reloaded");
-        self.mux.configure(new);
-        if new.keys != old.keys {
-            self.matcher.reset();
-        }
-        if new.font != old.font {
-            if new.font.size != old.font.size {
-                self.font_size = new.font.size;
-            }
-            self.load_fonts();
-        }
-        true
-    }
-}
+use super::layout::Layout;
+use super::state::{self, App, with_app};
+use super::tab_bar;
+use crate::config::{self, Config, OptionAsAlt};
+use crate::keys::Outcome;
+use crate::mux::{PaneId, WindowId};
+use crate::renderer::{Line, Overlay, PIXEL_FORMAT, PaneDraw};
+use crate::terminal::{CellStyle, KeyInput, MouseInput};
 
 pub struct Ivars {
-    state: RefCell<Option<State>>,
+    window: WindowId,
     layer: Retained<CAMetalLayer>,
     link: OnceCell<Retained<CADisplayLink>>,
+    layout: Cell<Layout>,
+    /// Each tab's cells in the tab bar, for clicks.
+    tab_cells: RefCell<Vec<Range<usize>>>,
+    focused: Cell<bool>,
     /// Text the input method is composing.
     marked: RefCell<String>,
     /// Text committed while `keyDown` runs the input method; `None` outside.
     key_texts: RefCell<Option<Vec<String>>>,
-    /// Focus or preedit changed: draw even if the terminal did not.
+    /// Focus, preedit or the tab bar changed: draw even if no pane did.
     overlay_dirty: Cell<bool>,
     /// The cursor cell in view coordinates, for placing the IME window.
     cursor_rect: Cell<NSRect>,
-    hold_timer: Cell<bool>,
+    /// Fractions of a line left over from trackpad scrolling.
+    scroll_remainder: Cell<f64>,
 }
 
 define_class!(
@@ -175,17 +88,17 @@ define_class!(
         fn view_did_change_backing_properties(&self) {
             let Some(window) = self.window() else { return };
             let scale = window.backingScaleFactor();
-            let changed = self.with_state(|state| {
-                if state.scale == scale {
+            self.ivars().layer.setContentsScale(scale);
+            let changed = with_app(|app| {
+                if app.scale == scale {
                     return false;
                 }
-                state.scale = scale;
-                state.load_fonts();
+                app.scale = scale;
+                app.load_fonts();
                 true
             });
             if changed == Some(true) {
-                self.ivars().layer.setContentsScale(scale);
-                self.relayout();
+                state::views().iter().for_each(|view| view.relayout());
             }
         }
 
@@ -208,11 +121,11 @@ define_class!(
         #[unsafe(method(keyUp:))]
         fn key_up(&self, event: &NSEvent) {
             let code = event.keyCode();
-            let swallowed = self.with_state(|s| {
-                let found = s.swallowed.iter().position(|&c| c == code);
-                found.map(|i| s.swallowed.swap_remove(i)).is_some()
+            let swallowed = with_app(|app| {
+                let found = app.swallowed.iter().position(|&c| c == code);
+                found.map(|i| app.swallowed.swap_remove(i)).is_some()
             });
-            if swallowed != Some(true) && self.ivars().marked.borrow().is_empty() {
+            if swallowed == Some(false) && self.ivars().marked.borrow().is_empty() {
                 self.send_key(event, key::Action::Release, None, Mods::empty());
             }
         }
@@ -232,7 +145,9 @@ define_class!(
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
-            self.send_mouse(event, mouse::Action::Press, Some(mouse::Button::Left));
+            if !self.click_tab_bar(event) {
+                self.send_mouse(event, mouse::Action::Press, Some(mouse::Button::Left));
+            }
         }
 
         #[unsafe(method(mouseUp:))]
@@ -267,24 +182,26 @@ define_class!(
 
         #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, event: &NSEvent) {
-            let point = self.convertPoint_fromView(event.locationInWindow(), None);
             let mods = keys::mods(event.modifierFlags());
             let dy = event.scrollingDeltaY();
-            self.with_state(|state| {
+            let precise = event.hasPreciseScrollingDeltas();
+            let point = self.pixel_point(event);
+            let remainder = &self.ivars().scroll_remainder;
+            with_app(|app| {
                 // Positive deltas scroll toward older output.
-                let lines = if event.hasPreciseScrollingDeltas() {
-                    let cell = f64::from(state.renderer.metrics().cell_height) / state.scale;
-                    state.scroll_remainder -= dy / cell;
-                    let lines = state.scroll_remainder.trunc();
-                    state.scroll_remainder -= lines;
-                    lines as isize
+                let lines = if precise {
+                    let cell = f64::from(app.renderer.metrics().cell_height) / app.scale;
+                    let total = remainder.get() - dy / cell;
+                    remainder.set(total.fract());
+                    total.trunc() as isize
                 } else if dy == 0.0 {
                     0
                 } else {
-                    -(dy.signum() as isize) * isize::try_from(state.config().mouse.wheel_lines).unwrap_or(1)
+                    -(dy.signum() as isize) * isize::try_from(app.config().mouse.wheel_lines).unwrap_or(1)
                 };
-                let (x, y) = ((point.x * state.scale) as f32, (point.y * state.scale) as f32);
-                state.mux.scroll(lines, mods, x, y);
+                if let Some((pane, x, y)) = self.pane_at(app, point) {
+                    pane_mut(app, pane, |p| p.scroll(lines, mods, x, y));
+                }
             });
             self.request_frame();
         }
@@ -390,24 +307,27 @@ define_class!(
             if let Some(link) = self.ivars().link.get() {
                 link.invalidate();
             }
-            // Dropping the mux hangs up the shell and joins its threads.
-            let state = self.ivars().state.borrow_mut().take();
-            drop(state);
-            VIEW.with(|v| v.borrow_mut().take());
+            // Dropping the panes hangs up their shells and joins their threads.
+            let window = self.ivars().window;
+            with_app(|app| app.mux.close_window(window));
+            state::remove_view(window);
         }
     }
 );
 
 impl TerminalView {
+    /// A view for mux window `window`. Call [`TerminalView::start`] once it
+    /// is in its NSWindow.
     pub fn new(
         mtm: MainThreadMarker,
         frame: NSRect,
-        renderer: Renderer,
-        settings: Settings,
+        window: WindowId,
+        layout: Layout,
+        device: &ProtocolObject<dyn MTLDevice>,
         scale: f64,
     ) -> Retained<Self> {
         let layer = CAMetalLayer::new();
-        layer.setDevice(Some(renderer.device()));
+        layer.setDevice(Some(device));
         layer.setPixelFormat(PIXEL_FORMAT);
         layer.setFramebufferOnly(true);
         layer.setContentsScale(scale);
@@ -415,41 +335,27 @@ impl TerminalView {
         layer.setContentsGravity(unsafe { kCAGravityTopLeft });
 
         let ivars = Ivars {
-            state: RefCell::new(None),
+            window,
             layer,
             link: OnceCell::new(),
+            layout: Cell::new(layout),
+            tab_cells: RefCell::new(Vec::new()),
+            focused: Cell::new(false),
             marked: RefCell::new(String::new()),
             key_texts: RefCell::new(None),
             overlay_dirty: Cell::new(true),
             cursor_rect: Cell::new(NSRect::ZERO),
-            hold_timer: Cell::new(false),
+            scroll_remainder: Cell::new(0.0),
         };
         let this = Self::alloc(mtm).set_ivars(ivars);
         let view: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         view.setWantsLayer(true);
         view.setLayerContentsRedrawPolicy(NSViewLayerContentsRedrawPolicy::Never);
-
-        let config = &settings.config;
-        let geometry = geometry(frame.size, scale, renderer.metrics(), config.window.padding);
-        match Mux::spawn(geometry, config, wake_from_any_thread) {
-            Ok(mux) => {
-                *view.ivars().state.borrow_mut() = Some(State {
-                    mux,
-                    renderer,
-                    font_size: config.font.size,
-                    settings,
-                    watcher: None,
-                    matcher: Matcher::default(),
-                    swallowed: Vec::new(),
-                    scale,
-                    focused: false,
-                    scroll_remainder: 0.0,
-                });
-            }
-            Err(err) => log::error!("starting the shell failed: {err}"),
-        }
-        VIEW.with(|v| *v.borrow_mut() = Some(view.clone()));
         view
+    }
+
+    pub fn mux_window(&self) -> WindowId {
+        self.ivars().window
     }
 
     /// Starts frame pacing. Call once the view is in its window.
@@ -460,147 +366,173 @@ impl TerminalView {
         unsafe { link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes) };
         let _ = self.ivars().link.set(link);
         self.relayout();
-        self.watch_config();
-    }
-
-    /// Watches the config file, replacing the previous watch.
-    fn watch_config(&self) {
-        self.with_state(|s| {
-            s.watcher = None;
-            s.watcher = s.settings.path.as_deref().map(|path| {
-                // Later, on the main queue, so the watch is not replaced from
-                // inside its own handler.
-                Watcher::new(path, || DispatchQueue::main().exec_async(|| with_view(|view| view.reload_config())))
-            });
-        });
-    }
-
-    /// Reads the config file again and applies it. A broken file keeps the
-    /// config in effect, and the banner says why.
-    fn reload_config(&self) {
-        self.watch_config();
-        let changed = self.with_state(|s| {
-            let loaded = s.settings.path.as_deref().map_or_else(|| Ok(Config::default()), config::load);
-            s.reload(loaded)
-        });
-        if changed == Some(true) {
-            self.relayout();
-        }
+        self.tabs_changed();
     }
 
     /// Draws on the next display refresh.
-    fn request_frame(&self) {
+    pub fn request_frame(&self) {
         if let Some(link) = self.ivars().link.get() {
             link.setPaused(false);
         }
     }
 
-    fn with_state<R>(&self, f: impl FnOnce(&mut State) -> R) -> Option<R> {
-        self.ivars().state.borrow_mut().as_mut().map(f)
+    /// Shows the tabs and title as they are now.
+    pub fn tabs_changed(&self) {
+        let window = self.ivars().window;
+        let title = with_app(|app| {
+            let tabs = app.mux.tabs(window);
+            let active = tabs.iter().position(|t| t.active)?;
+            let title = tabs[active].info.title();
+            let title = if title.is_empty() { "slutty" } else { title };
+            // AeroSpace and rho find windows by this title.
+            Some(if tabs.len() > 1 { format!("[{}/{}] {title}", active + 1, tabs.len()) } else { title.to_owned() })
+        })
+        .flatten();
+        if let (Some(title), Some(window)) = (title, self.window()) {
+            window.setTitle(&NSString::from_str(&title));
+        }
+        self.ivars().overlay_dirty.set(true);
+        self.request_frame();
     }
 
-    /// Parses waiting output and reacts to what the panes report.
-    fn pump(&self) {
-        let Some((pump, deadline)) = self.with_state(|s| (s.mux.pump(), s.mux.hold_deadline())) else { return };
-        if pump.output {
-            self.request_frame();
-        }
-        if pump.more {
-            wake_from_any_thread();
-        }
-        if let Some(deadline) = deadline {
-            self.schedule_hold_timeout(deadline);
-        }
-        for event in pump.events {
-            match event {
-                Event::TitleChanged(title) => {
-                    if let Some(window) = self.window() {
-                        window.setTitle(&NSString::from_str(&title));
-                    }
-                }
-                Event::PaneClosed => {
-                    if let Some(window) = self.window() {
-                        window.close();
-                    }
-                }
-            }
+    pub fn close_window(&self) {
+        if let Some(window) = self.window() {
+            window.close();
         }
     }
 
-    /// Comes back when a synchronized-output hold expires, so a program that
-    /// never releases it cannot freeze the screen.
-    fn schedule_hold_timeout(&self, deadline: Instant) {
-        if self.ivars().hold_timer.replace(true) {
-            return;
-        }
-        let delay = deadline.saturating_duration_since(Instant::now());
-        let when = DispatchTime::try_from(delay).unwrap_or(DispatchTime::NOW);
-        let scheduled = DispatchQueue::main().after(when, || {
-            with_view(|view| {
-                view.ivars().hold_timer.set(false);
-                view.request_frame();
-            });
+    /// Fits the panes to the view after a resize, scale or font change, and
+    /// draws at once so the window never shows a stretched frame.
+    pub fn relayout(&self) {
+        let ivars = self.ivars();
+        let size = self.bounds().size;
+        let window = ivars.window;
+        let layout = with_app(|app| {
+            let m = app.renderer.metrics();
+            let layout = Layout::new(size, app.scale, m, app.config().window.padding, app.tab_bar);
+            app.mux.resize(window, layout.area);
+            layout
         });
-        if scheduled.is_err() {
-            self.ivars().hold_timer.set(false);
-        }
+        let Some(layout) = layout else { return };
+        ivars.layout.set(layout);
+        ivars.layer.setDrawableSize(NSSize::new(f64::from(layout.width), f64::from(layout.height)));
+        ivars.overlay_dirty.set(true);
+        self.draw();
     }
 
-    /// Draws if the terminal or the overlay changed. Returns whether it drew.
+    /// Draws if a visible pane or the window's own chrome changed. Returns
+    /// whether it drew.
     fn draw(&self) -> bool {
         let ivars = self.ivars();
+        let window = ivars.window;
+        let layout = ivars.layout.get();
         let overlay_dirty = ivars.overlay_dirty.replace(false);
+        let focused = ivars.focused.get();
         let marked = ivars.marked.borrow();
-        let mut state = ivars.state.borrow_mut();
-        let Some(state) = state.as_mut() else { return false };
-        let geometry = state.mux.geometry();
-        let chrome: Vec<Line> =
-            state.settings.error.iter().map(|err| banner(err, &state.settings.config, geometry)).collect();
-        let mut frame = state.mux.frame();
-        if !frame.changed && !overlay_dirty {
-            return false;
-        }
-        let overlay = Overlay { focused: state.focused, preedit: &marked };
-        let origin = [geometry.padding_left as f32, geometry.padding_top as f32];
-        state.renderer.render(&ivars.layer, &mut frame, &overlay, origin, &chrome);
+        let drawn = with_app(|app| {
+            let App { mux, renderer, settings, .. } = app;
+            let config = &settings.config;
+            let m = renderer.metrics();
+            let mut chrome = Vec::new();
+            if layout.tab_bar {
+                let cols = (layout.width / m.cell_width) as usize;
+                let bar = tab_bar::build(
+                    &mux.tabs(window),
+                    &config.theme,
+                    cols,
+                    config.tab_bar.max_width,
+                    layout.width as f32,
+                );
+                *ivars.tab_cells.borrow_mut() = bar.tabs;
+                chrome.push(bar.line);
+            }
+            if let Some(err) = &settings.error {
+                chrome.push(banner(err, config, layout));
+            }
+            let active = mux.active_pane(window);
+            let visible = mux.visible(window);
+            if !overlay_dirty && !visible.iter().any(|(_, _, frame)| frame.changed) {
+                return None;
+            }
+            let several = visible.len() > 1;
+            let mut cursor = None;
+            let mut panes: Vec<PaneDraw<'_>> = visible
+                .into_iter()
+                .map(|(id, rect, frame)| {
+                    let is_active = Some(id) == active;
+                    let origin = [
+                        layout.origin[0] + u32::from(rect.x) * m.cell_width,
+                        layout.origin[1] + u32::from(rect.y) * m.cell_height,
+                    ];
+                    if is_active && let Some(c) = frame.cursor {
+                        cursor = Some([
+                            origin[0] + u32::from(c.x) * m.cell_width,
+                            origin[1] + u32::from(c.y) * m.cell_height,
+                        ]);
+                    }
+                    let preedit = if is_active { marked.as_str() } else { "" };
+                    PaneDraw {
+                        id,
+                        frame,
+                        origin: origin.map(|v| v as f32),
+                        overlay: Overlay { focused: focused && is_active, preedit },
+                        dim: several && !is_active,
+                    }
+                })
+                .collect();
+            let [r, g, b] = config.theme.background;
+            renderer.render(&ivars.layer, &mut panes, &chrome, Rgb { r, g, b });
+            Some((cursor, m))
+        })
+        .flatten();
+        let Some((cursor, m)) = drawn else { return false };
         log::trace!("frame presented");
-
-        if let Some(cursor) = frame.cursor {
-            let m = state.renderer.metrics();
-            let s = state.scale;
+        if let Some([x, y]) = cursor {
+            let s = self.window().map_or(1.0, |w| w.backingScaleFactor());
             ivars.cursor_rect.set(NSRect::new(
-                NSPoint::new(
-                    f64::from(geometry.padding_left + u32::from(cursor.x) * m.cell_width) / s,
-                    f64::from(geometry.padding_top + u32::from(cursor.y) * m.cell_height) / s,
-                ),
+                NSPoint::new(f64::from(x) / s, f64::from(y) / s),
                 NSSize::new(f64::from(m.cell_width) / s, f64::from(m.cell_height) / s),
             ));
         }
         true
     }
 
-    /// Fits the grid to the view after a resize or scale change, and draws at
-    /// once so the window never shows a stretched frame.
-    fn relayout(&self) {
-        let size = self.bounds().size;
-        let resized = self.with_state(|state| {
-            let geometry = geometry(size, state.scale, state.renderer.metrics(), state.config().window.padding);
-            self.ivars().layer.setDrawableSize(NSSize::new(f64::from(geometry.width), f64::from(geometry.height)));
-            state.mux.resize(geometry);
-        });
-        if resized.is_some() {
-            self.ivars().overlay_dirty.set(true);
-            self.draw();
-        }
-    }
-
     fn set_focused(&self, focused: bool) {
-        self.with_state(|s| {
-            s.focused = focused;
-            s.mux.focus(focused);
-        });
+        self.ivars().focused.set(focused);
+        let window = self.ivars().window;
+        with_app(|app| app.mux.focus(window, focused));
         self.ivars().overlay_dirty.set(true);
         self.request_frame();
+    }
+
+    /// A point of a mouse event in device pixels from the view's corner.
+    fn pixel_point(&self, event: &NSEvent) -> [f64; 2] {
+        let point = self.convertPoint_fromView(event.locationInWindow(), None);
+        let s = self.window().map_or(1.0, |w| w.backingScaleFactor());
+        [point.x * s, point.y * s]
+    }
+
+    /// The pane under a point, with the point relative to the pane.
+    fn pane_at(&self, app: &mut App, [x, y]: [f64; 2]) -> Option<(PaneId, f32, f32)> {
+        let layout = self.ivars().layout.get();
+        let pane = app.mux.active_pane(self.ivars().window)?;
+        let x = x - f64::from(layout.origin[0]);
+        let y = y - f64::from(layout.origin[1]);
+        Some((pane, x as f32, y as f32))
+    }
+
+    /// Activates the tab under a click in the tab bar. Returns whether the
+    /// click was in the tab bar.
+    fn click_tab_bar(&self, event: &NSEvent) -> bool {
+        let [x, y] = self.pixel_point(event);
+        let Some(cell) = self.ivars().layout.get().tab_bar_cell(x, y) else { return false };
+        let tab = self.ivars().tab_cells.borrow().iter().position(|cells| cells.contains(&cell));
+        if let Some(tab) = tab {
+            let window = self.ivars().window;
+            with_app(|app| app.mux.activate_tab(window, tab));
+            self.tabs_changed();
+        }
+        true
     }
 
     fn key_equivalent(&self, event: &NSEvent) -> bool {
@@ -633,15 +565,15 @@ impl TerminalView {
         else {
             return false;
         };
-        let outcome = self.with_state(|s| {
-            let outcome = s.matcher.press(&s.settings.config.keys, press);
+        let outcome = with_app(|app| {
+            let outcome = app.matcher.press(&app.settings.config.keys, press);
             log::trace!("{press:?}: {outcome:?}");
             if outcome != Outcome::Unbound {
                 // No key-up comes for keys pressed with command, so keep few.
-                s.swallowed.retain(|&c| c != code);
-                s.swallowed.push(code);
-                if s.swallowed.len() > 8 {
-                    s.swallowed.remove(0);
+                app.swallowed.retain(|&c| c != code);
+                app.swallowed.push(code);
+                if app.swallowed.len() > 8 {
+                    app.swallowed.remove(0);
                 }
             }
             outcome
@@ -656,66 +588,8 @@ impl TerminalView {
         }
     }
 
-    fn run_action(&self, action: Action) {
-        log::debug!("running {action:?}");
-        match action {
-            Action::Send { text } => {
-                self.with_state(|s| s.mux.send(text.as_bytes()));
-                self.request_frame();
-            }
-            Action::SendKey { key: chord } => {
-                let (key, mods, unshifted) = chord.encoding();
-                // A key with no command or control types its character.
-                let text = unshifted
-                    .filter(|_| !mods.intersects(Mods::CTRL | Mods::SUPER))
-                    .map(|c| if mods.contains(Mods::SHIFT) { c.to_ascii_uppercase() } else { c }.to_string());
-                let consumed = if text.is_some() { mods & Mods::SHIFT } else { Mods::empty() };
-                let input =
-                    KeyInput { key, action: key::Action::Press, mods, consumed, text: text.as_deref(), unshifted };
-                self.with_state(|s| s.mux.key(&input));
-                self.request_frame();
-            }
-            Action::Paste => self.paste_clipboard(),
-            Action::Quit => NSApplication::sharedApplication(self.mtm()).terminate(None),
-            Action::IncreaseFontSize => self.set_font_size(|size, _| size * 1.1),
-            Action::DecreaseFontSize => self.set_font_size(|size, _| size / 1.1),
-            Action::ResetFontSize => self.set_font_size(|_, configured| configured),
-            Action::ReloadConfig => self.reload_config(),
-            Action::ToggleFullscreen => {
-                if let Some(window) = self.window() {
-                    window.toggleFullScreen(None);
-                }
-            }
-            // The matcher runs these itself.
-            Action::KeyTable { .. } | Action::PopTable => {}
-        }
-    }
-
-    fn paste_clipboard(&self) {
-        let pasteboard = NSPasteboard::generalPasteboard();
-        if let Some(text) = pasteboard.stringForType(unsafe { NSPasteboardTypeString }) {
-            self.with_state(|s| s.mux.paste(&text.to_string()));
-            self.request_frame();
-        }
-    }
-
-    /// Sets the font size from the current and the configured one, keeping
-    /// the window's size.
-    fn set_font_size(&self, size: impl FnOnce(f64, f64) -> f64) {
-        self.with_state(|s| {
-            s.font_size = size(s.font_size, s.config().font.size).clamp(4.0, 200.0);
-            s.load_fonts();
-        });
-        self.relayout();
-    }
-
-    /// Whether the app should ask before quitting.
-    pub fn confirms_quit(&self) -> bool {
-        self.with_state(|s| s.config().window.confirm_quit).unwrap_or(false)
-    }
-
     fn option_is_alt(&self, flags: NSEventModifierFlags) -> bool {
-        let setting = self.with_state(|s| s.config().terminal.option_as_alt).unwrap_or(OptionAsAlt::None);
+        let setting = with_app(|app| app.config().terminal.option_as_alt).unwrap_or(OptionAsAlt::None);
         let (left, right) = keys::option_sides(flags);
         match setting {
             OptionAsAlt::None => false,
@@ -780,9 +654,7 @@ impl TerminalView {
             text,
             unshifted,
         };
-        self.with_state(|s| s.mux.key(&input));
-        // A key press scrolls back to the bottom.
-        self.request_frame();
+        self.with_active_pane(|pane| pane.key(&input));
     }
 
     fn send_text(&self, text: &str) {
@@ -794,61 +666,49 @@ impl TerminalView {
             text: Some(text),
             unshifted: None,
         };
-        self.with_state(|s| s.mux.key(&input));
+        self.with_active_pane(|pane| pane.key(&input));
+    }
+
+    /// Runs `f` on the active pane, then draws: input scrolls to the bottom.
+    pub fn with_active_pane(&self, f: impl FnOnce(&mut crate::mux::Pane)) {
+        let window = self.ivars().window;
+        with_app(|app| {
+            if let Some(pane) = app.mux.active_pane(window) {
+                pane_mut(app, pane, f);
+            }
+        });
         self.request_frame();
     }
 
     fn send_mouse(&self, event: &NSEvent, action: mouse::Action, button: Option<mouse::Button>) {
-        let point = self.convertPoint_fromView(event.locationInWindow(), None);
         let mods = keys::mods(event.modifierFlags());
-        self.with_state(|state| {
-            if state.mux.mouse_tracking() {
-                let (x, y) = ((point.x * state.scale) as f32, (point.y * state.scale) as f32);
-                state.mux.mouse(&MouseInput { action, button, mods, x, y });
-            }
+        let point = self.pixel_point(event);
+        with_app(|app| {
+            let Some((pane, x, y)) = self.pane_at(app, point) else { return };
+            pane_mut(app, pane, |p| {
+                if p.mouse_tracking() {
+                    p.mouse(&MouseInput { action, button, mods, x, y });
+                }
+            });
         });
     }
 }
 
-/// A line across the top that says why the config file is not in effect.
-fn banner(error: &str, config: &Config, g: Geometry) -> Line {
-    let rgb = |[r, g, b]: config::Rgb| Rgb { r, g, b };
-    let theme = &config.theme;
-    let mut line = Line::new(0.0, 0.0, g.width as f32, rgb(theme.ansi[1]));
-    let fits = (g.width / g.cell_width) as usize;
-    let text: String = format!(" {error}").chars().take(fits).collect();
-    line.push_str(&text, rgb(theme.background), CellStyle { bold: true, ..CellStyle::default() });
-    line
-}
-
-/// The view's size in device pixels, as a grid of cells with padding.
-fn geometry(size: NSSize, scale: f64, m: Metrics, padding: Padding) -> Geometry {
-    let width = (size.width * scale).round().max(0.0) as u32;
-    let height = (size.height * scale).round().max(0.0) as u32;
-    let [left, right, top, bottom] = padding_pixels(padding, m, scale);
-    let fit = |space: u32, cell: u32| u16::try_from((space / cell).max(1)).unwrap_or(u16::MAX);
-    Geometry {
-        cols: fit(width.saturating_sub(left + right), m.cell_width),
-        rows: fit(height.saturating_sub(top + bottom), m.cell_height),
-        cell_width: m.cell_width,
-        cell_height: m.cell_height,
-        width,
-        height,
-        padding_left: left,
-        padding_top: top,
-        padding_right: right,
-        padding_bottom: bottom,
+fn pane_mut(app: &mut App, pane: PaneId, f: impl FnOnce(&mut crate::mux::Pane)) {
+    if let Some(pane) = app.mux.pane_mut(pane) {
+        f(pane);
     }
 }
 
-/// Left, right, top and bottom padding in device pixels.
-fn padding_pixels(p: Padding, m: Metrics, scale: f64) -> [u32; 4] {
-    [
-        p.left.pixels(m.cell_width, scale),
-        p.right.pixels(m.cell_width, scale),
-        p.top.pixels(m.cell_height, scale),
-        p.bottom.pixels(m.cell_height, scale),
-    ]
+/// A line across the top that says why the config file is not in effect.
+fn banner(error: &str, config: &Config, layout: Layout) -> Line {
+    let rgb = |[r, g, b]: config::Rgb| Rgb { r, g, b };
+    let theme = &config.theme;
+    let mut line = Line::new(0.0, 0.0, layout.width as f32, rgb(theme.ansi[1]));
+    let fits = (layout.width / layout.area.cell_width) as usize;
+    let text: String = format!(" {error}").chars().take(fits).collect();
+    line.push_str(&text, rgb(theme.background), CellStyle { bold: true, ..CellStyle::default() });
+    line
 }
 
 /// The text of an NSString or NSAttributedString from the input system.
@@ -860,13 +720,4 @@ fn string_of(object: &AnyObject) -> String {
     } else {
         String::new()
     }
-}
-
-/// Window content size, in points, that fits `cols` x `rows` cells.
-pub fn content_size(config: &Config, m: Metrics, scale: f64) -> NSSize {
-    let [left, right, top, bottom] = padding_pixels(config.window.padding, m, scale);
-    NSSize::new(
-        f64::from(u32::from(config.window.cols) * m.cell_width + left + right) / scale,
-        f64::from(u32::from(config.window.rows) * m.cell_height + top + bottom) / scale,
-    )
 }

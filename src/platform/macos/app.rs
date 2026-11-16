@@ -1,19 +1,23 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use objc2::rc::Retained;
 use objc2::runtime::{NSObjectProtocol, ProtocolObject, Sel};
-use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
-    NSApplicationTerminateReply, NSBackingStoreType, NSEventModifierFlags, NSMenu, NSMenuItem, NSScreen, NSWindow,
-    NSWindowButton, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSApplicationTerminateReply,
+    NSBackingStoreType, NSEventModifierFlags, NSMenu, NSMenuItem, NSScreen, NSWindow, NSWindowButton,
+    NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{NSObject, NSPoint, NSRect, NSString};
 
-use super::view::{Settings, TerminalView, content_size, with_view};
+use super::actions;
+use super::layout::{self, Layout};
+use super::state::{self, App, Settings, with_app};
+use super::view::TerminalView;
 use crate::config::{self, Config};
 use crate::font::Fonts;
+use crate::mux::Mux;
 use crate::renderer::Renderer;
 
 define_class!(
@@ -31,11 +35,11 @@ define_class!(
 
         #[unsafe(method(applicationShouldTerminate:))]
         fn should_terminate(&self, _app: &NSApplication) -> NSApplicationTerminateReply {
-            // With no terminal left, as after the last shell exits, nothing
-            // is lost by quitting.
-            let mut ask = false;
-            with_view(|view| ask = view.confirms_quit());
-            if !ask || confirm_quit(self.mtm()) {
+            // With no window left, as after the last shell exits, nothing is
+            // lost by quitting.
+            let ask = with_app(|app| app.config().window.confirm_quit).unwrap_or(false) && !state::views().is_empty();
+            if !ask || actions::alert(self.mtm(), "Quit slutty?", "Every shell in every window will be closed.", "Quit")
+            {
                 NSApplicationTerminateReply::TerminateNow
             } else {
                 NSApplicationTerminateReply::TerminateCancel
@@ -48,15 +52,6 @@ impl AppDelegate {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         unsafe { msg_send![Self::alloc(mtm), init] }
     }
-}
-
-fn confirm_quit(mtm: MainThreadMarker) -> bool {
-    let alert = NSAlert::new(mtm);
-    alert.setMessageText(&NSString::from_str("Quit slutty?"));
-    alert.setInformativeText(&NSString::from_str("Every shell in every window will be closed."));
-    alert.addButtonWithTitle(&NSString::from_str("Quit"));
-    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
-    alert.runModal() == NSAlertFirstButtonReturn
 }
 
 /// Reads the config file at `path`, if any. A broken file gives the defaults
@@ -101,9 +96,37 @@ pub fn run(config_path: Option<PathBuf>) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
+    App::start(Mux::new(state::wake_from_any_thread), renderer, settings, scale);
 
-    let size = content_size(&settings.config, renderer.metrics(), scale);
-    let rect = NSRect::new(NSPoint::new(0.0, 0.0), size);
+    if !open_window(mtm, None) {
+        return ExitCode::FAILURE;
+    }
+    app.activate();
+    app.run();
+    ExitCode::SUCCESS
+}
+
+/// Opens a window with one tab running the login shell in `cwd`. Returns
+/// whether it opened.
+pub(super) fn open_window(mtm: MainThreadMarker, cwd: Option<&Path>) -> bool {
+    let opened = with_app(|app| {
+        let m = app.renderer.metrics();
+        let size = layout::content_size(app.config(), m, app.scale, app.tab_bar);
+        let layout = Layout::new(size, app.scale, m, app.config().window.padding, app.tab_bar);
+        let id = app.mux.open_window(layout.area, &app.settings.config, cwd)?;
+        Ok::<_, std::io::Error>((id, layout, size, app.renderer.device().retain(), app.scale))
+    });
+    let (id, layout, size, device, scale) = match opened {
+        Some(Ok(opened)) => opened,
+        Some(Err(err)) => {
+            log::error!("starting the shell failed: {err}");
+            return false;
+        }
+        None => return false,
+    };
+    // Made outside `with_app`: AppKit sizes the view as it starts, which
+    // relays it out.
+    let view = TerminalView::new(mtm, NSRect::new(NSPoint::new(0.0, 0.0), size), id, layout, &device, scale);
     // Titled keeps the rounded corners, shadow and key focus; the title bar
     // itself is hidden below.
     let style = NSWindowStyleMask::Titled
@@ -114,27 +137,25 @@ pub fn run(config_path: Option<PathBuf>) -> ExitCode {
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
-            rect,
+            NSRect::new(NSPoint::new(0.0, 0.0), size),
             style,
             NSBackingStoreType::Buffered,
             false,
         )
     };
-    // The window is owned here, not released by AppKit on close.
+    // The window is owned by its view's entry in the app, not released by
+    // AppKit on close.
     unsafe { window.setReleasedWhenClosed(false) };
     window.setTitle(&NSString::from_str("slutty"));
+    window.setContentView(Some(&view));
     hide_titlebar(&window);
     window.center();
-
-    let view = TerminalView::new(mtm, rect, renderer, settings, scale);
-    window.setContentView(Some(&view));
     window.setDelegate(Some(ProtocolObject::from_ref(&*view)));
     window.makeFirstResponder(Some(&view));
+    state::add_view(view.mux_window(), view.clone());
     view.start();
     window.makeKeyAndOrderFront(None);
-    app.activate();
-    app.run();
-    ExitCode::SUCCESS
+    true
 }
 
 /// Hides the title bar and its traffic lights, like WezTerm's
