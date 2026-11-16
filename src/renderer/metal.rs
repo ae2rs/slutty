@@ -15,7 +15,7 @@ use objc2_metal::{
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
 use super::atlas::{ATLAS_SIZE, Atlas};
-use super::scene::{GlyphInstance, Overlay, RectInstance, Scene};
+use super::scene::{GlyphInstance, Line, Overlay, RectInstance, Scene};
 use crate::font::{Fonts, Metrics};
 use crate::terminal::Frame;
 
@@ -104,9 +104,16 @@ impl Renderer {
     }
 
     /// Draws `frame` into `layer`, with the grid's top-left corner at
-    /// `origin` (device pixels).
-    pub fn render(&mut self, layer: &CAMetalLayer, frame: &mut Frame, overlay: &Overlay<'_>, origin: [f32; 2]) {
-        self.scene.build(frame, overlay, &self.fonts, &mut self.atlas);
+    /// `origin` (device pixels), and the `chrome` lines over it.
+    pub fn render(
+        &mut self,
+        layer: &CAMetalLayer,
+        frame: &mut Frame,
+        overlay: &Overlay<'_>,
+        origin: [f32; 2],
+        chrome: &[Line],
+    ) {
+        self.scene.build(frame, overlay, chrome, &self.fonts, &mut self.atlas);
         self.upload_glyphs();
 
         let Some(drawable) = layer.nextDrawable() else {
@@ -114,8 +121,10 @@ impl Renderer {
             return;
         };
         let size = layer.drawableSize();
-        let uniforms = Uniforms { viewport: [size.width as f32, size.height as f32], origin };
-        if let Err(e) = self.encode(&drawable, &uniforms, frame.background) {
+        let viewport = [size.width as f32, size.height as f32];
+        let grid = Uniforms { viewport, origin };
+        let screen = Uniforms { viewport, origin: [0.0, 0.0] };
+        if let Err(e) = self.encode(&drawable, [&grid, &screen], frame.background) {
             log::error!("drawing failed: {e}");
         }
     }
@@ -136,10 +145,12 @@ impl Renderer {
         }
     }
 
+    /// Draws the scene: the grid batches with the first uniforms, the chrome
+    /// with the second.
     fn encode(
         &self,
         drawable: &ProtocolObject<dyn CAMetalDrawable>,
-        uniforms: &Uniforms,
+        [grid, screen]: [&Uniforms; 2],
         clear: Rgb,
     ) -> Result<(), RenderError> {
         let pass = MTLRenderPassDescriptor::new();
@@ -154,25 +165,25 @@ impl Renderer {
         let commands = self.queue.commandBuffer().ok_or_else(|| err("no command buffer"))?;
         let encoder = commands.renderCommandEncoderWithDescriptor(&pass).ok_or_else(|| err("no encoder"))?;
         let s = &self.scene;
-        let layers = Layers::pack(
-            &self.device,
-            [
-                Batch::Rects(&s.rects),
-                Batch::Glyphs(&s.glyphs),
-                Batch::Rects(&s.overlay_rects),
-                Batch::Glyphs(&s.overlay_glyphs),
-            ],
-        );
-        if let Some((buffer, batches)) = layers {
-            // SAFETY: the uniforms outlive the call, which copies them; every
+        let batches = [
+            (grid, Batch::Rects(&s.rects)),
+            (grid, Batch::Glyphs(&s.glyphs)),
+            (grid, Batch::Rects(&s.overlay_rects)),
+            (grid, Batch::Glyphs(&s.overlay_glyphs)),
+            (screen, Batch::Rects(&s.chrome_rects)),
+            (screen, Batch::Glyphs(&s.chrome_glyphs)),
+        ];
+        if let Some((buffer, layout)) = pack(&self.device, batches.iter().map(|(_, batch)| batch)) {
+            // SAFETY: the uniforms outlive the calls, which copy them; every
             // offset and count describes instances inside `buffer`.
             unsafe {
-                encoder.setVertexBytes_length_atIndex(NonNull::from(uniforms).cast(), size_of::<Uniforms>(), 0);
                 encoder.setFragmentTexture_atIndex(Some(&self.texture), 0);
-                for (offset, count, glyphs) in batches {
+                for ((uniforms, _), (offset, count, glyphs)) in batches.iter().zip(layout) {
                     if count == 0 {
                         continue;
                     }
+                    let uniforms: &Uniforms = uniforms;
+                    encoder.setVertexBytes_length_atIndex(NonNull::from(uniforms).cast(), size_of::<Uniforms>(), 0);
                     encoder.setRenderPipelineState(if glyphs { &self.glyph_pipeline } else { &self.rect_pipeline });
                     encoder.setVertexBuffer_offset_atIndex(Some(&buffer), offset, 1);
                     encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
@@ -196,37 +207,32 @@ enum Batch<'a> {
     Glyphs(&'a [GlyphInstance]),
 }
 
-struct Layers;
-
-impl Layers {
-    /// Copies the batches into one buffer. Returns it with each batch's
-    /// offset, instance count and kind (glyphs or rects).
-    #[allow(clippy::type_complexity, reason = "a private tuple read right away")]
-    fn pack(
-        device: &Device,
-        batches: [Batch<'_>; 4],
-    ) -> Option<(Retained<ProtocolObject<dyn MTLBuffer>>, Vec<(usize, usize, bool)>)> {
-        // Buffer offsets must be aligned; 256 suits every Apple GPU.
-        const ALIGN: usize = 256;
-        let mut bytes = Vec::new();
-        let mut layout = Vec::new();
-        for batch in &batches {
-            let offset = bytes.len().next_multiple_of(ALIGN);
-            bytes.resize(offset, 0);
-            let (raw, count, glyphs) = match batch {
-                Batch::Rects(r) => (as_bytes(r), r.len(), false),
-                Batch::Glyphs(g) => (as_bytes(g), g.len(), true),
-            };
-            bytes.extend_from_slice(raw);
-            layout.push((offset, count, glyphs));
-        }
-        let ptr = NonNull::new(bytes.as_mut_ptr().cast::<c_void>())?;
-        // SAFETY: `bytes` is valid for its length, which is copied.
-        let buffer = unsafe {
-            device.newBufferWithBytes_length_options(ptr, bytes.len(), MTLResourceOptions::StorageModeShared)
-        }?;
-        Some((buffer, layout))
+/// Copies the batches into one buffer. Returns it with each batch's offset,
+/// instance count and kind (glyphs or rects).
+#[allow(clippy::type_complexity, reason = "a private tuple read right away")]
+fn pack<'a>(
+    device: &Device,
+    batches: impl Iterator<Item = &'a Batch<'a>>,
+) -> Option<(Retained<ProtocolObject<dyn MTLBuffer>>, Vec<(usize, usize, bool)>)> {
+    // Buffer offsets must be aligned; 256 suits every Apple GPU.
+    const ALIGN: usize = 256;
+    let mut bytes = Vec::new();
+    let mut layout = Vec::new();
+    for batch in batches {
+        let offset = bytes.len().next_multiple_of(ALIGN);
+        bytes.resize(offset, 0);
+        let (raw, count, glyphs) = match batch {
+            Batch::Rects(r) => (as_bytes(r), r.len(), false),
+            Batch::Glyphs(g) => (as_bytes(g), g.len(), true),
+        };
+        bytes.extend_from_slice(raw);
+        layout.push((offset, count, glyphs));
     }
+    let ptr = NonNull::new(bytes.as_mut_ptr().cast::<c_void>())?;
+    // SAFETY: `bytes` is valid for its length, which is copied.
+    let buffer =
+        unsafe { device.newBufferWithBytes_length_options(ptr, bytes.len(), MTLResourceOptions::StorageModeShared) }?;
+    Some((buffer, layout))
 }
 
 fn as_bytes<T: Copy>(items: &[T]) -> &[u8] {
