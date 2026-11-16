@@ -4,6 +4,10 @@
 
 [bind]
 "cmd+q" = "quit"
+"cmd+n" = "new-window"
+"ctrl+shift+n" = "new-window"
+"leader m" = "pop-pane"
+"leader M" = "pop-tab"
 "cmd+v" = "paste"
 "ctrl+shift+v" = "paste"
 "cmd+c" = "copy"

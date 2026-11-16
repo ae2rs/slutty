@@ -46,6 +46,12 @@ pub enum Action {
         index: TabIndex,
     },
     ToggleTabBar,
+    /// Opens a window in the active pane's directory.
+    NewWindow,
+    /// Moves the active pane into a new window.
+    PopPane,
+    /// Moves the active tab into a new window.
+    PopTab,
     /// Splits the active pane; the new pane goes to the right.
     SplitRight,
     /// Splits the active pane; the new pane goes below.
