@@ -39,7 +39,8 @@ impl Matcher {
         for layer in layers {
             let mut bindings = layer.iter().filter(|b| b.starts_with(&self.pending)).peekable();
             if bindings.peek().is_some() {
-                started = Some(bindings.find(|b| b.chords.len() == self.pending.len()).map(|b: &Binding| b.action.clone()));
+                started =
+                    Some(bindings.find(|b| b.chords.len() == self.pending.len()).map(|b: &Binding| b.action.clone()));
                 break;
             }
         }
@@ -86,7 +87,7 @@ mod tests {
     }
 
     fn press(chord: &str) -> KeyPress {
-        let c: crate::keys::Chord = chord.parse().expect(chord);
+        let c: crate::keys::chord::Chord = chord.parse().expect(chord);
         let shifted = match c.key {
             KeyName::Char(ch) if c.mods.shift => Some(ch.to_ascii_uppercase()),
             _ => None,

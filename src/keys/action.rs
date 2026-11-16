@@ -13,9 +13,13 @@ use super::chord::Chord;
 #[serde(tag = "action", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Action {
     /// Sends text to the program as if typed.
-    Send { text: String },
+    Send {
+        text: String,
+    },
     /// Sends a key to the program, encoded like a key press.
-    SendKey { key: Chord },
+    SendKey {
+        key: Chord,
+    },
     Paste,
     Quit,
     IncreaseFontSize,

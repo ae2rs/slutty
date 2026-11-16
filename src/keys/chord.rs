@@ -17,7 +17,9 @@ pub struct Modifiers {
 impl Modifiers {
     fn mods(self) -> Mods {
         let mut mods = Mods::empty();
-        for (on, flag) in [(self.cmd, Mods::SUPER), (self.ctrl, Mods::CTRL), (self.alt, Mods::ALT), (self.shift, Mods::SHIFT)] {
+        for (on, flag) in
+            [(self.cmd, Mods::SUPER), (self.ctrl, Mods::CTRL), (self.alt, Mods::ALT), (self.shift, Mods::SHIFT)]
+        {
             if on {
                 mods |= flag;
             }
@@ -101,7 +103,11 @@ impl Chord {
     pub fn encoding(&self) -> (Key, Mods, Option<char>) {
         let (key, unshifted) = match self.key {
             KeyName::Char(c) if c.is_ascii_uppercase() => {
-                return (char_key(c.to_ascii_lowercase()), self.mods.mods() | Mods::SHIFT, Some(c.to_ascii_lowercase()));
+                return (
+                    char_key(c.to_ascii_lowercase()),
+                    self.mods.mods() | Mods::SHIFT,
+                    Some(c.to_ascii_lowercase()),
+                );
             }
             KeyName::Char(c) => (char_key(c), Some(c)),
             KeyName::Enter => (Key::Enter, None),
@@ -185,20 +191,8 @@ fn char_key(c: char) -> Key {
 }
 
 fn function_key(n: u8) -> Key {
-    const KEYS: [Key; 12] = [
-        Key::F1,
-        Key::F2,
-        Key::F3,
-        Key::F4,
-        Key::F5,
-        Key::F6,
-        Key::F7,
-        Key::F8,
-        Key::F9,
-        Key::F10,
-        Key::F11,
-        Key::F12,
-    ];
+    const KEYS: [Key; 12] =
+        [Key::F1, Key::F2, Key::F3, Key::F4, Key::F5, Key::F6, Key::F7, Key::F8, Key::F9, Key::F10, Key::F11, Key::F12];
     KEYS.get(usize::from(n).wrapping_sub(1)).copied().unwrap_or(Key::Unidentified)
 }
 

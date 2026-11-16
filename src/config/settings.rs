@@ -121,7 +121,9 @@ impl<'de> Deserialize<'de> for Length {
             }
 
             fn visit_i64<E: de::Error>(self, v: i64) -> Result<Length, E> {
-                u16::try_from(v).map(|v| Length::Points(f64::from(v))).map_err(|_| E::custom("a length cannot be negative"))
+                u16::try_from(v)
+                    .map(|v| Length::Points(f64::from(v)))
+                    .map_err(|_| E::custom("a length cannot be negative"))
             }
 
             fn visit_f64<E: de::Error>(self, v: f64) -> Result<Length, E> {

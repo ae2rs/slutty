@@ -7,6 +7,6 @@ mod chord;
 mod matcher;
 
 pub use action::Action;
-pub use bindings::{Keys, KeysFile};
-pub use chord::{Chord, KeyName, KeyPress, Modifiers};
+pub use bindings::Keys;
+pub use chord::{KeyName, KeyPress, Modifiers};
 pub use matcher::{Matcher, Outcome};
