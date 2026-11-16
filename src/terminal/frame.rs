@@ -3,9 +3,7 @@
 //! server can ship rows to a client.
 
 use libghostty_vt::color::Rgb;
-use libghostty_vt::render::{
-    CellIterator, Colors, CursorVisualStyle, Dirty, RowIteration, RowIterator, Snapshot,
-};
+use libghostty_vt::render::{CellIterator, Colors, CursorVisualStyle, Dirty, RowIteration, RowIterator, Snapshot};
 use libghostty_vt::screen::CellWide;
 use libghostty_vt::style::Underline;
 
@@ -105,7 +103,11 @@ impl Iterators {
 
 impl Frame {
     /// Copies what changed in `snapshot` and marks the snapshot clean.
-    pub(super) fn capture(&mut self, snapshot: &Snapshot<'static, '_>, it: &mut Iterators) -> libghostty_vt::error::Result<()> {
+    pub(super) fn capture(
+        &mut self,
+        snapshot: &Snapshot<'static, '_>,
+        it: &mut Iterators,
+    ) -> libghostty_vt::error::Result<()> {
         let colors = snapshot.colors()?;
         let cols = snapshot.cols()?;
         let rows = usize::from(snapshot.rows()?);

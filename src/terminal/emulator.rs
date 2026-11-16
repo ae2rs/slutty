@@ -4,15 +4,15 @@ use std::time::{Duration, Instant};
 
 use libghostty_vt::color::{Palette, Rgb};
 use libghostty_vt::effect::{
-    ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, PrimaryDeviceAttributes,
-    SecondaryDeviceAttributes, DeviceType,
+    ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType, PrimaryDeviceAttributes,
+    SecondaryDeviceAttributes,
 };
+use libghostty_vt::error::Result;
 use libghostty_vt::key::{self, Key, Mods, OptionAsAlt};
 use libghostty_vt::mode::Mode;
 use libghostty_vt::mouse;
 use libghostty_vt::report::{ColorScheme, SizeReportSize};
 use libghostty_vt::terminal::{CursorStyle, ScrollViewport};
-use libghostty_vt::error::Result;
 use libghostty_vt::{Error, RenderState, focus, paste};
 
 use super::frame::{Frame, Iterators};
@@ -74,9 +74,9 @@ struct Shared {
 impl Shared {
     fn capture(&self, vt: &libghostty_vt::Terminal<'static, 'static>) {
         let mut state = self.render_state.borrow_mut();
-        let result = state.update(vt).and_then(|snapshot| {
-            self.frame.borrow_mut().capture(&snapshot, &mut self.iterators.borrow_mut())
-        });
+        let result = state
+            .update(vt)
+            .and_then(|snapshot| self.frame.borrow_mut().capture(&snapshot, &mut self.iterators.borrow_mut()));
         if let Err(err) = result {
             log::error!("capturing the screen failed: {err}");
         }
@@ -131,7 +131,12 @@ impl Terminal {
             let shared = Rc::clone(&shared);
             move |_| {
                 let g = shared.geometry.get();
-                Some(SizeReportSize { rows: g.rows, columns: g.cols, cell_width: g.cell_width, cell_height: g.cell_height })
+                Some(SizeReportSize {
+                    rows: g.rows,
+                    columns: g.cols,
+                    cell_width: g.cell_width,
+                    cell_height: g.cell_height,
+                })
             }
         })?
         .on_render_hold({
@@ -181,7 +186,10 @@ impl Terminal {
 
     /// The new title, if the program changed it since the last call.
     pub fn take_title(&self) -> Option<String> {
-        self.shared.title_changed.replace(false).then(|| String::from_utf8_lossy(self.vt.title().unwrap_or_default()).into_owned())
+        self.shared
+            .title_changed
+            .replace(false)
+            .then(|| String::from_utf8_lossy(self.vt.title().unwrap_or_default()).into_owned())
     }
 
     pub fn geometry(&self) -> Geometry {
@@ -358,7 +366,11 @@ fn device_attributes() -> DeviceAttributes {
     DeviceAttributes {
         primary: PrimaryDeviceAttributes::new(
             ConformanceLevel::VT220,
-            &[DeviceAttributeFeature::COLUMNS_132, DeviceAttributeFeature::SELECTIVE_ERASE, DeviceAttributeFeature::ANSI_COLOR],
+            &[
+                DeviceAttributeFeature::COLUMNS_132,
+                DeviceAttributeFeature::SELECTIVE_ERASE,
+                DeviceAttributeFeature::ANSI_COLOR,
+            ],
         ),
         secondary: SecondaryDeviceAttributes { device_type: DeviceType::VT220, firmware_version: 1, rom_cartridge: 0 },
         tertiary: Default::default(),
