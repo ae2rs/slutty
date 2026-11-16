@@ -9,6 +9,7 @@ mod pointer;
 mod quick_select;
 mod state;
 mod tab_bar;
+mod ticker;
 mod view;
 mod watch;
 

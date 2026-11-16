@@ -6,6 +6,7 @@
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::ops::Range;
+use std::time::Instant;
 
 use libghostty_vt::color::Rgb;
 use libghostty_vt::key::{self, Key, Mods};
@@ -14,8 +15,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSEvent, NSEventModifierFlags, NSResponder, NSTextInputClient, NSTrackingArea, NSTrackingAreaOptions, NSView,
-    NSViewLayerContentsRedrawPolicy, NSWindowDelegate,
+    NSEvent, NSEventModifierFlags, NSResponder, NSScreen, NSTextInputClient, NSTrackingArea, NSTrackingAreaOptions,
+    NSView, NSViewLayerContentsRedrawPolicy, NSWindowDelegate, NSWindowOcclusionState,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{
@@ -32,6 +33,8 @@ use super::pointer::Hover;
 use super::quick_select::QuickSelect;
 use super::state::{self, App, with_app};
 use super::tab_bar::{self, SpinnerFrame};
+use super::ticker;
+use crate::animation::Live;
 use crate::config::{self, Config, OptionAsAlt};
 use crate::keys::Outcome;
 use crate::mux::{Axis, ModeKey, PaneId, Rect, Visible, WindowId};
@@ -46,6 +49,11 @@ pub struct Ivars {
     spinner_surface: RefCell<Surface>,
     /// What the spinner surface shows; `None` while it is hidden.
     spinner: RefCell<Option<SpinnerFrame>>,
+    /// Some of the window shows on a screen; see [`TerminalView::update_on_screen`].
+    on_screen: Cell<bool>,
+    /// The zones last reported live, so the timer is armed again only when
+    /// they change.
+    live: Cell<Live>,
     link: OnceCell<Retained<CADisplayLink>>,
     layout: Cell<Layout>,
     /// Each tab's cells in the tab bar, for clicks.
@@ -334,6 +342,21 @@ define_class!(
             self.set_focused(false);
         }
 
+        #[unsafe(method(windowDidChangeOcclusionState:))]
+        fn window_did_change_occlusion_state(&self, _notification: &NSNotification) {
+            self.update_on_screen();
+        }
+
+        #[unsafe(method(windowDidMove:))]
+        fn window_did_move(&self, _notification: &NSNotification) {
+            self.update_on_screen();
+        }
+
+        #[unsafe(method(windowDidChangeScreen:))]
+        fn window_did_change_screen(&self, _notification: &NSNotification) {
+            self.update_on_screen();
+        }
+
         #[unsafe(method(windowWillClose:))]
         fn window_will_close(&self, _notification: &NSNotification) {
             // The link retains the view; invalidating it breaks the cycle.
@@ -368,6 +391,8 @@ impl TerminalView {
             surface: RefCell::new(surface),
             spinner_surface: RefCell::new(spinner_surface),
             spinner: RefCell::new(None),
+            on_screen: Cell::new(false),
+            live: Cell::new(Live::default()),
             link: OnceCell::new(),
             layout: Cell::new(layout),
             tab_cells: RefCell::new(Vec::new()),
@@ -422,6 +447,7 @@ impl TerminalView {
         self.addTrackingArea(&area);
         self.relayout();
         self.tabs_changed();
+        self.update_on_screen();
     }
 
     /// Draws on the next display refresh.
@@ -526,7 +552,8 @@ impl TerminalView {
                 );
                 *ivars.tab_cells.borrow_mut() = bar.tabs;
                 if !bar.spinners.is_empty() && settings.error.is_none() {
-                    spinner = Some(SpinnerFrame { spinners: bar.spinners, background: bar.line.background, frame: 0 });
+                    let frame = ticker::phase(Instant::now()).spinner;
+                    spinner = Some(SpinnerFrame { spinners: bar.spinners, background: bar.line.background, frame });
                 }
                 chrome.push(bar.line);
             }
@@ -638,6 +665,7 @@ impl TerminalView {
             Some((cursor, m))
         })
         .flatten();
+        self.note_live();
         let Some((cursor, m)) = drawn else { return false };
         log::trace!("frame presented");
         if let Some([x, y]) = cursor {
@@ -668,6 +696,60 @@ impl TerminalView {
             log::trace!("spinner presented");
         }
         *ivars.spinner.borrow_mut() = spinner;
+    }
+
+    /// The zones animating in this window now.
+    pub fn live(&self) -> Live {
+        let ivars = self.ivars();
+        Live { spinner: ivars.on_screen.get() && ivars.spinner.borrow().is_some() }
+    }
+
+    /// Arms the timer again if the live zones changed.
+    fn note_live(&self) {
+        let live = self.live();
+        if self.ivars().live.replace(live) != live {
+            ticker::reschedule();
+        }
+    }
+
+    /// Brings the live zones to what they show at `now`, drawing only those
+    /// that changed.
+    pub fn animate(&self, now: Instant) {
+        let phase = ticker::phase(now);
+        let spinner = self.ivars().spinner.borrow().clone();
+        if let Some(spinner) = spinner
+            && self.live().spinner
+            && spinner.frame != phase.spinner
+        {
+            let spinner = SpinnerFrame { frame: phase.spinner, ..spinner };
+            with_app(|app| self.show_spinner(&mut app.renderer, Some(spinner)));
+        }
+    }
+
+    /// Reads whether the window shows on a screen: not covered, minimized or
+    /// hidden, and with at least a cell of it on a display. AeroSpace parks
+    /// windows of other workspaces in a screen corner, which counts as
+    /// visible to macOS.
+    fn update_on_screen(&self) {
+        let on_screen = self.window().is_some_and(|window| {
+            let visible = window.occlusionState().contains(NSWindowOcclusionState::Visible);
+            let frame = window.frame();
+            let area = self.ivars().layout.get().area;
+            let scale = window.backingScaleFactor();
+            let cell = (f64::from(area.cell_width) / scale, f64::from(area.cell_height) / scale);
+            let shown = NSScreen::screens(self.mtm()).iter().any(|screen| {
+                let s = screen.frame();
+                let width = (frame.max().x.min(s.max().x) - frame.min().x.max(s.min().x)).max(0.0);
+                let height = (frame.max().y.min(s.max().y) - frame.min().y.max(s.min().y)).max(0.0);
+                width >= cell.0 && height >= cell.1
+            });
+            visible && shown
+        });
+        if self.ivars().on_screen.replace(on_screen) != on_screen {
+            log::trace!("window on screen: {on_screen}");
+            self.animate(Instant::now());
+            self.note_live();
+        }
     }
 
     fn set_focused(&self, focused: bool) {
