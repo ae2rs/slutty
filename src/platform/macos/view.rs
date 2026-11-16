@@ -765,7 +765,7 @@ impl TerminalView {
     }
 
     /// Shows a blinking cursor and starts its phase and cut-off over.
-    fn restart_blink(&self) {
+    pub(super) fn restart_blink(&self) {
         let now = Instant::now();
         self.ivars().input_at.set(now);
         self.animate(now);

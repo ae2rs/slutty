@@ -147,6 +147,7 @@ impl TerminalView {
         // SAFETY: a constant AppKit defines.
         if let Some(text) = pasteboard.stringForType(unsafe { NSPasteboardTypeString }) {
             let text = text.to_string();
+            self.restart_blink();
             self.with_active_pane(|pane| {
                 if !pane.paste_into_search(&text) {
                     pane.paste(&text);
