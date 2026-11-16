@@ -518,14 +518,7 @@ impl TerminalView {
             };
             let (cw, ch) = (m.cell_width as f32, m.cell_height as f32);
             let mut rects = Vec::new();
-            if visible.len() > 1 {
-                for (id, rect, _) in &visible {
-                    if Some(*id) != active {
-                        let size = [f32::from(rect.cols) * cw, f32::from(rect.rows) * ch];
-                        rects.push(RectInstance::new(cell(rect.x, rect.y), size, DIM));
-                    }
-                }
-            }
+            let split = visible.len() > 1;
             let [r, g, b] = theme.split;
             let stroke = m.stroke.max(1) as f32;
             for (axis, rect) in &dividers {
@@ -602,7 +595,8 @@ impl TerminalView {
                     let preedit = if is_active { marked.as_str() } else { "" };
                     let copy_cursor = modes.iter().find(|(p, _)| *p == id).and_then(|(_, modes)| modes.copy_cursor);
                     let overlay = Overlay { focused: focused && is_active, copy_cursor, preedit };
-                    PaneDraw { id, frame, origin, overlay, tint: Tint::NONE }
+                    let tint = if split && !is_active { INACTIVE } else { Tint::NONE };
+                    PaneDraw { id, frame, origin, overlay, tint }
                 })
                 .collect();
             renderer.render(&ivars.layer, &mut panes, &rects, &chrome, rgb(theme.background));
@@ -939,9 +933,8 @@ struct PaneModes {
 const BOLD: CellStyle =
     CellStyle { bold: true, italic: false, faint: false, underline: false, strikethrough: false, wide: false };
 
-/// Black at a fifth over panes without the keyboard: WezTerm's inactive
-/// panes, at 0.8 brightness.
-const DIM: [u8; 4] = [0, 0, 0, 51];
+/// Panes without the keyboard, as WezTerm's default `inactive_pane_hsb`.
+const INACTIVE: Tint = Tint { saturation: 0.9, brightness: 0.8 };
 
 fn rgb([r, g, b]: config::Rgb) -> Rgb {
     Rgb { r, g, b }
