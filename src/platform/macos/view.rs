@@ -5,17 +5,19 @@
 //! changes paces the frames.
 
 use std::cell::{Cell, OnceCell, RefCell};
+use std::path::PathBuf;
 use std::time::Instant;
 
 use dispatch2::{DispatchQueue, DispatchTime};
+use libghostty_vt::color::Rgb;
 use libghostty_vt::key::{self, Key, Mods};
 use libghostty_vt::mouse;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSEvent, NSEventModifierFlags, NSPasteboard, NSPasteboardTypeString, NSResponder, NSTextInputClient, NSView,
-    NSViewLayerContentsRedrawPolicy, NSWindowDelegate,
+    NSApplication, NSEvent, NSEventModifierFlags, NSPasteboard, NSPasteboardTypeString, NSResponder, NSTextInputClient,
+    NSView, NSViewLayerContentsRedrawPolicy, NSWindowDelegate,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound, NSNotification, NSObject, NSPoint, NSRange,
@@ -24,11 +26,13 @@ use objc2_foundation::{
 use objc2_quartz_core::{CADisplayLink, CALayer, CAMetalLayer, kCAGravityTopLeft};
 
 use super::keys;
-use crate::config::{Config, OptionAsAlt, Padding};
+use super::watch::Watcher;
+use crate::config::{self, Config, OptionAsAlt, Padding};
 use crate::font::{Fonts, Metrics};
+use crate::keys::{Action, Matcher, Outcome};
 use crate::mux::{Event, Mux};
-use crate::renderer::{Overlay, PIXEL_FORMAT, Renderer};
-use crate::terminal::{Geometry, KeyInput, MouseInput};
+use crate::renderer::{Line, Overlay, PIXEL_FORMAT, Renderer};
+use crate::terminal::{CellStyle, Geometry, KeyInput, MouseInput};
 
 thread_local! {
     /// The window's view, for wake-ups that arrive through the main queue.
@@ -40,21 +44,86 @@ pub fn wake_from_any_thread() {
     DispatchQueue::main().exec_async(|| with_view(|view| view.pump()));
 }
 
-fn with_view(f: impl FnOnce(&TerminalView)) {
+pub fn with_view(f: impl FnOnce(&TerminalView)) {
     // Cloned out, so `f` may close the window, which clears VIEW.
     if let Some(view) = VIEW.with(|v| v.borrow().clone()) {
         f(&view);
     }
 }
 
+/// The config in effect, where it came from, and why the file could not be
+/// used, if it could not.
+pub struct Settings {
+    pub config: Config,
+    pub path: Option<PathBuf>,
+    pub error: Option<String>,
+}
+
 struct State {
     mux: Mux,
     renderer: Renderer,
-    config: Config,
+    settings: Settings,
+    watcher: Option<Watcher>,
+    matcher: Matcher,
+    /// Key codes whose press a binding used, so their release is not sent.
+    swallowed: Vec<u16>,
+    /// In points; the font-size keys change it.
+    font_size: f64,
     scale: f64,
     focused: bool,
     /// Fractions of a line left over from trackpad scrolling.
     scroll_remainder: f64,
+}
+
+impl State {
+    fn config(&self) -> &Config {
+        &self.settings.config
+    }
+
+    /// Loads the fonts at the current size and scale. On failure the old ones
+    /// stay, and the banner says why.
+    fn load_fonts(&mut self) {
+        match Fonts::new(&self.settings.config.font, self.font_size * self.scale) {
+            Ok(fonts) => self.renderer.set_fonts(fonts),
+            Err(err) => {
+                log::error!("loading fonts failed: {err}");
+                self.settings.error = Some(err.to_string());
+            }
+        }
+    }
+
+    /// Applies a config read from the file. Returns whether anything changed.
+    fn reload(&mut self, loaded: Result<Config, String>) -> bool {
+        let new = match loaded {
+            Ok(new) => new,
+            Err(err) => {
+                let changed = self.settings.error.as_ref() != Some(&err);
+                if changed {
+                    log::error!("config: {err}");
+                }
+                self.settings.error = Some(err);
+                return changed;
+            }
+        };
+        let had_error = self.settings.error.take().is_some();
+        let old = std::mem::replace(&mut self.settings.config, new);
+        let new = &self.settings.config;
+        if *new == old {
+            return had_error;
+        }
+        log::info!("config reloaded");
+        self.mux.configure(new);
+        if new.keys != old.keys {
+            self.matcher.reset();
+        }
+        if new.font != old.font {
+            if new.font.size != old.font.size {
+                self.font_size = new.font.size;
+            }
+            self.load_fonts();
+        }
+        true
+    }
 }
 
 pub struct Ivars {
@@ -110,11 +179,8 @@ define_class!(
                 if state.scale == scale {
                     return false;
                 }
-                match Fonts::new(&state.config.font, state.config.font.size * scale) {
-                    Ok(fonts) => state.renderer.set_fonts(fonts),
-                    Err(err) => log::error!("loading fonts failed: {err}"),
-                }
                 state.scale = scale;
+                state.load_fonts();
                 true
             });
             if changed == Some(true) {
@@ -134,38 +200,34 @@ define_class!(
 
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
-            self.handle_key_down(event);
+            if !self.bind_key(event) {
+                self.handle_key_down(event);
+            }
         }
 
         #[unsafe(method(keyUp:))]
         fn key_up(&self, event: &NSEvent) {
-            if self.ivars().marked.borrow().is_empty() {
+            let code = event.keyCode();
+            let swallowed = self.with_state(|s| {
+                let found = s.swallowed.iter().position(|&c| c == code);
+                found.map(|i| s.swallowed.swap_remove(i)).is_some()
+            });
+            if swallowed != Some(true) && self.ivars().marked.borrow().is_empty() {
                 self.send_key(event, key::Action::Release, None, Mods::empty());
             }
         }
 
-        // Control chords reach performKeyEquivalent before keyDown, and some
-        // (ctrl+tab, ctrl+esc) never reach keyDown at all.
+        // Command and control chords reach performKeyEquivalent before
+        // keyDown and the menus, and some (ctrl+tab, ctrl+esc) never reach
+        // keyDown at all.
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
-            let flags = event.modifierFlags();
-            let focused = self.window().is_some_and(|w| w.firstResponder().is_some_and(|r| std::ptr::eq(&*r, self.as_ref())));
-            let ours = focused
-                && flags.contains(NSEventModifierFlags::Control)
-                && !flags.contains(NSEventModifierFlags::Command);
-            if ours {
-                self.handle_key_down(event);
-            }
-            ours
+            self.key_equivalent(event)
         }
 
         #[unsafe(method(paste:))]
         fn paste(&self, _sender: Option<&AnyObject>) {
-            let pasteboard = NSPasteboard::generalPasteboard();
-            if let Some(text) = pasteboard.stringForType(unsafe { NSPasteboardTypeString }) {
-                self.with_state(|s| s.mux.paste(&text.to_string()));
-                self.request_frame();
-            }
+            self.paste_clipboard();
         }
 
         #[unsafe(method(mouseDown:))]
@@ -219,7 +281,7 @@ define_class!(
                 } else if dy == 0.0 {
                     0
                 } else {
-                    -(dy.signum() as isize) * isize::try_from(state.config.mouse.wheel_lines).unwrap_or(1)
+                    -(dy.signum() as isize) * isize::try_from(state.config().mouse.wheel_lines).unwrap_or(1)
                 };
                 let (x, y) = ((point.x * state.scale) as f32, (point.y * state.scale) as f32);
                 state.mux.scroll(lines, mods, x, y);
@@ -337,7 +399,13 @@ define_class!(
 );
 
 impl TerminalView {
-    pub fn new(mtm: MainThreadMarker, frame: NSRect, renderer: Renderer, config: Config, scale: f64) -> Retained<Self> {
+    pub fn new(
+        mtm: MainThreadMarker,
+        frame: NSRect,
+        renderer: Renderer,
+        settings: Settings,
+        scale: f64,
+    ) -> Retained<Self> {
         let layer = CAMetalLayer::new();
         layer.setDevice(Some(renderer.device()));
         layer.setPixelFormat(PIXEL_FORMAT);
@@ -361,11 +429,22 @@ impl TerminalView {
         view.setWantsLayer(true);
         view.setLayerContentsRedrawPolicy(NSViewLayerContentsRedrawPolicy::Never);
 
+        let config = &settings.config;
         let geometry = geometry(frame.size, scale, renderer.metrics(), config.window.padding);
-        match Mux::spawn(geometry, &config, wake_from_any_thread) {
+        match Mux::spawn(geometry, config, wake_from_any_thread) {
             Ok(mux) => {
-                *view.ivars().state.borrow_mut() =
-                    Some(State { mux, renderer, config, scale, focused: false, scroll_remainder: 0.0 });
+                *view.ivars().state.borrow_mut() = Some(State {
+                    mux,
+                    renderer,
+                    font_size: config.font.size,
+                    settings,
+                    watcher: None,
+                    matcher: Matcher::default(),
+                    swallowed: Vec::new(),
+                    scale,
+                    focused: false,
+                    scroll_remainder: 0.0,
+                });
             }
             Err(err) => log::error!("starting the shell failed: {err}"),
         }
@@ -381,6 +460,32 @@ impl TerminalView {
         unsafe { link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes) };
         let _ = self.ivars().link.set(link);
         self.relayout();
+        self.watch_config();
+    }
+
+    /// Watches the config file, replacing the previous watch.
+    fn watch_config(&self) {
+        self.with_state(|s| {
+            s.watcher = None;
+            s.watcher = s.settings.path.as_deref().map(|path| {
+                // Later, on the main queue, so the watch is not replaced from
+                // inside its own handler.
+                Watcher::new(path, || DispatchQueue::main().exec_async(|| with_view(|view| view.reload_config())))
+            });
+        });
+    }
+
+    /// Reads the config file again and applies it. A broken file keeps the
+    /// config in effect, and the banner says why.
+    fn reload_config(&self) {
+        self.watch_config();
+        let changed = self.with_state(|s| {
+            let loaded = s.settings.path.as_deref().map_or_else(|| Ok(Config::default()), config::load);
+            s.reload(loaded)
+        });
+        if changed == Some(true) {
+            self.relayout();
+        }
     }
 
     /// Draws on the next display refresh.
@@ -449,13 +554,15 @@ impl TerminalView {
         let mut state = ivars.state.borrow_mut();
         let Some(state) = state.as_mut() else { return false };
         let geometry = state.mux.geometry();
+        let chrome: Vec<Line> =
+            state.settings.error.iter().map(|err| banner(err, &state.settings.config, geometry)).collect();
         let mut frame = state.mux.frame();
         if !frame.changed && !overlay_dirty {
             return false;
         }
         let overlay = Overlay { focused: state.focused, preedit: &marked };
         let origin = [geometry.padding_left as f32, geometry.padding_top as f32];
-        state.renderer.render(&ivars.layer, &mut frame, &overlay, origin);
+        state.renderer.render(&ivars.layer, &mut frame, &overlay, origin, &chrome);
         log::trace!("frame presented");
 
         if let Some(cursor) = frame.cursor {
@@ -477,7 +584,7 @@ impl TerminalView {
     fn relayout(&self) {
         let size = self.bounds().size;
         let resized = self.with_state(|state| {
-            let geometry = geometry(size, state.scale, state.renderer.metrics(), state.config.window.padding);
+            let geometry = geometry(size, state.scale, state.renderer.metrics(), state.config().window.padding);
             self.ivars().layer.setDrawableSize(NSSize::new(f64::from(geometry.width), f64::from(geometry.height)));
             state.mux.resize(geometry);
         });
@@ -496,8 +603,119 @@ impl TerminalView {
         self.request_frame();
     }
 
+    fn key_equivalent(&self, event: &NSEvent) -> bool {
+        let focused =
+            self.window().is_some_and(|w| w.firstResponder().is_some_and(|r| std::ptr::eq(&*r, self.as_ref())));
+        if !focused {
+            return false;
+        }
+        if self.bind_key(event) {
+            return true;
+        }
+        let flags = event.modifierFlags();
+        let ctrl = flags.contains(NSEventModifierFlags::Control) && !flags.contains(NSEventModifierFlags::Command);
+        if ctrl {
+            self.handle_key_down(event);
+        }
+        ctrl
+    }
+
+    /// Runs the binding this key press belongs to. Returns whether a binding
+    /// used the key, which then does not reach the program.
+    fn bind_key(&self, event: &NSEvent) -> bool {
+        if !self.ivars().marked.borrow().is_empty() {
+            return false;
+        }
+        let typed = |flags| event.charactersByApplyingModifiers(flags).and_then(|s| s.to_string().chars().next());
+        let code = event.keyCode();
+        let flags = event.modifierFlags();
+        let Some(press) = keys::press(code, flags, typed(NSEventModifierFlags(0)), typed(NSEventModifierFlags::Shift))
+        else {
+            return false;
+        };
+        let outcome = self.with_state(|s| {
+            let outcome = s.matcher.press(&s.settings.config.keys, press);
+            log::trace!("{press:?}: {outcome:?}");
+            if outcome != Outcome::Unbound {
+                // No key-up comes for keys pressed with command, so keep few.
+                s.swallowed.retain(|&c| c != code);
+                s.swallowed.push(code);
+                if s.swallowed.len() > 8 {
+                    s.swallowed.remove(0);
+                }
+            }
+            outcome
+        });
+        match outcome {
+            Some(Outcome::Run(action)) => {
+                self.run_action(action);
+                true
+            }
+            Some(Outcome::Handled) => true,
+            Some(Outcome::Unbound) | None => false,
+        }
+    }
+
+    fn run_action(&self, action: Action) {
+        log::debug!("running {action:?}");
+        match action {
+            Action::Send { text } => {
+                self.with_state(|s| s.mux.send(text.as_bytes()));
+                self.request_frame();
+            }
+            Action::SendKey { key: chord } => {
+                let (key, mods, unshifted) = chord.encoding();
+                // A key with no command or control types its character.
+                let text = unshifted
+                    .filter(|_| !mods.intersects(Mods::CTRL | Mods::SUPER))
+                    .map(|c| if mods.contains(Mods::SHIFT) { c.to_ascii_uppercase() } else { c }.to_string());
+                let consumed = if text.is_some() { mods & Mods::SHIFT } else { Mods::empty() };
+                let input =
+                    KeyInput { key, action: key::Action::Press, mods, consumed, text: text.as_deref(), unshifted };
+                self.with_state(|s| s.mux.key(&input));
+                self.request_frame();
+            }
+            Action::Paste => self.paste_clipboard(),
+            Action::Quit => NSApplication::sharedApplication(self.mtm()).terminate(None),
+            Action::IncreaseFontSize => self.set_font_size(|size, _| size * 1.1),
+            Action::DecreaseFontSize => self.set_font_size(|size, _| size / 1.1),
+            Action::ResetFontSize => self.set_font_size(|_, configured| configured),
+            Action::ReloadConfig => self.reload_config(),
+            Action::ToggleFullscreen => {
+                if let Some(window) = self.window() {
+                    window.toggleFullScreen(None);
+                }
+            }
+            // The matcher runs these itself.
+            Action::KeyTable { .. } | Action::PopTable => {}
+        }
+    }
+
+    fn paste_clipboard(&self) {
+        let pasteboard = NSPasteboard::generalPasteboard();
+        if let Some(text) = pasteboard.stringForType(unsafe { NSPasteboardTypeString }) {
+            self.with_state(|s| s.mux.paste(&text.to_string()));
+            self.request_frame();
+        }
+    }
+
+    /// Sets the font size from the current and the configured one, keeping
+    /// the window's size.
+    fn set_font_size(&self, size: impl FnOnce(f64, f64) -> f64) {
+        self.with_state(|s| {
+            s.font_size = size(s.font_size, s.config().font.size).clamp(4.0, 200.0);
+            s.load_fonts();
+        });
+        self.relayout();
+    }
+
+    /// Whether the app should ask before quitting.
+    pub fn confirms_quit(&self) -> bool {
+        self.with_state(|s| s.config().window.confirm_quit).unwrap_or(false)
+    }
+
     fn option_is_alt(&self, flags: NSEventModifierFlags) -> bool {
-        let setting = self.with_state(|s| s.config.terminal.option_as_alt).unwrap_or(OptionAsAlt::None);
+        let setting = self.with_state(|s| s.config().terminal.option_as_alt).unwrap_or(OptionAsAlt::None);
         let (left, right) = keys::option_sides(flags);
         match setting {
             OptionAsAlt::None => false,
@@ -590,6 +808,17 @@ impl TerminalView {
             }
         });
     }
+}
+
+/// A line across the top that says why the config file is not in effect.
+fn banner(error: &str, config: &Config, g: Geometry) -> Line {
+    let rgb = |[r, g, b]: config::Rgb| Rgb { r, g, b };
+    let theme = &config.theme;
+    let mut line = Line::new(0.0, 0.0, g.width as f32, rgb(theme.ansi[1]));
+    let fits = (g.width / g.cell_width) as usize;
+    let text: String = format!(" {error}").chars().take(fits).collect();
+    line.push_str(&text, rgb(theme.background), CellStyle { bold: true, ..CellStyle::default() });
+    line
 }
 
 /// The view's size in device pixels, as a grid of cells with padding.

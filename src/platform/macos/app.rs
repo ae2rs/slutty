@@ -1,16 +1,18 @@
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use objc2::rc::Retained;
 use objc2::runtime::{NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSEventModifierFlags,
-    NSMenu, NSMenuItem, NSScreen, NSWindow, NSWindowButton, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
+    NSApplicationTerminateReply, NSBackingStoreType, NSEventModifierFlags, NSMenu, NSMenuItem, NSScreen, NSWindow,
+    NSWindowButton, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{NSObject, NSPoint, NSRect, NSString};
 
-use super::view::{TerminalView, content_size};
-use crate::config::Config;
+use super::view::{Settings, TerminalView, content_size, with_view};
+use crate::config::{self, Config};
 use crate::font::Fonts;
 use crate::renderer::Renderer;
 
@@ -26,6 +28,19 @@ define_class!(
         fn should_terminate_after_last_window_closed(&self, _app: &NSApplication) -> bool {
             true
         }
+
+        #[unsafe(method(applicationShouldTerminate:))]
+        fn should_terminate(&self, _app: &NSApplication) -> NSApplicationTerminateReply {
+            // With no terminal left, as after the last shell exits, nothing
+            // is lost by quitting.
+            let mut ask = false;
+            with_view(|view| ask = view.confirms_quit());
+            if !ask || confirm_quit(self.mtm()) {
+                NSApplicationTerminateReply::TerminateNow
+            } else {
+                NSApplicationTerminateReply::TerminateCancel
+            }
+        }
     }
 );
 
@@ -35,8 +50,31 @@ impl AppDelegate {
     }
 }
 
+fn confirm_quit(mtm: MainThreadMarker) -> bool {
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str("Quit slutty?"));
+    alert.setInformativeText(&NSString::from_str("Every shell in every window will be closed."));
+    alert.addButtonWithTitle(&NSString::from_str("Quit"));
+    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    alert.runModal() == NSAlertFirstButtonReturn
+}
+
+/// Reads the config file at `path`, if any. A broken file gives the defaults
+/// and the reason, for the banner.
+fn load_settings(path: Option<PathBuf>) -> Settings {
+    let (config, error) = match path.as_deref().map(config::load) {
+        Some(Err(err)) => {
+            log::error!("config: {err}");
+            (Config::default(), Some(err))
+        }
+        Some(Ok(config)) => (config, None),
+        None => (Config::default(), None),
+    };
+    Settings { config, path, error }
+}
+
 /// Opens one terminal window and runs the AppKit event loop.
-pub fn run(config: Config) -> ExitCode {
+pub fn run(config_path: Option<PathBuf>) -> ExitCode {
     let Some(mtm) = MainThreadMarker::new() else {
         log::error!("slutty must start on the main thread");
         return ExitCode::FAILURE;
@@ -47,19 +85,24 @@ pub fn run(config: Config) -> ExitCode {
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     app.setMainMenu(Some(&main_menu(mtm)));
 
+    let mut settings = load_settings(config_path);
     let scale = NSScreen::mainScreen(mtm).map_or(2.0, |s| s.backingScaleFactor());
-    let renderer = match Fonts::new(&config.font, config.font.size * scale)
-        .map_err(|e| e.to_string())
-        .and_then(|fonts| Renderer::new(fonts).map_err(|e| e.to_string()))
-    {
-        Ok(renderer) => renderer,
-        Err(err) => {
-            log::error!("starting the renderer failed: {err}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let size = settings.config.font.size * scale;
+    let fonts = Fonts::new(&settings.config.font, size).or_else(|err| {
+        log::error!("loading fonts failed: {err}");
+        settings.error = Some(err.to_string());
+        Fonts::new(&config::Font::default(), size)
+    });
+    let renderer =
+        match fonts.map_err(|e| e.to_string()).and_then(|fonts| Renderer::new(fonts).map_err(|e| e.to_string())) {
+            Ok(renderer) => renderer,
+            Err(err) => {
+                log::error!("starting the renderer failed: {err}");
+                return ExitCode::FAILURE;
+            }
+        };
 
-    let size = content_size(&config, renderer.metrics(), scale);
+    let size = content_size(&settings.config, renderer.metrics(), scale);
     let rect = NSRect::new(NSPoint::new(0.0, 0.0), size);
     // Titled keeps the rounded corners, shadow and key focus; the title bar
     // itself is hidden below.
@@ -83,7 +126,7 @@ pub fn run(config: Config) -> ExitCode {
     hide_titlebar(&window);
     window.center();
 
-    let view = TerminalView::new(mtm, rect, renderer, config, scale);
+    let view = TerminalView::new(mtm, rect, renderer, settings, scale);
     window.setContentView(Some(&view));
     window.setDelegate(Some(ProtocolObject::from_ref(&*view)));
     window.makeFirstResponder(Some(&view));
