@@ -488,6 +488,7 @@ impl TerminalView {
                     cols,
                     config.tab_bar.max_width,
                     layout.width as f32,
+                    focused,
                 );
                 *ivars.tab_cells.borrow_mut() = bar.tabs;
                 chrome.push(bar.line);
