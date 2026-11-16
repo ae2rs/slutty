@@ -39,6 +39,7 @@ pub struct Mouse {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[expect(dead_code, reason = "chosen in the config file, which comes in M2")]
 pub enum CursorShape {
     Block,
     Bar,
@@ -47,6 +48,7 @@ pub enum CursorShape {
 
 /// Which Option keys send Alt. The others compose characters (`∂`, `é`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[expect(dead_code, reason = "chosen in the config file, which comes in M2")]
 pub enum OptionAsAlt {
     None,
     Left,
