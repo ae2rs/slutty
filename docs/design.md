@@ -267,6 +267,13 @@ Taken from `~/dotfiles/wezterm/.config/wezterm/`. Milestones refer to the [roadm
 
 Each milestone is one PR. Each must keep the idle rule: no work while nothing changes.
 
+### Checking the idle rule
+
+1. Run a release build with `RUST_LOG=slutty=trace`. Each drawn frame logs `frame presented`.
+2. Focus the window and leave it for 60 s at a static prompt.
+3. Sample with `top -l 4 -s 20 -pid <pid> -stats pid,cpu,idlew,time`.
+4. Pass: CPU 0.0%, idle wake-ups 0, CPU time flat, no new `frame presented` lines.
+
 ### M1: MVP
 
 - One window, one pane, the login shell.
