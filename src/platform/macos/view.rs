@@ -34,7 +34,7 @@ use super::tab_bar;
 use crate::config::{self, Config, OptionAsAlt};
 use crate::keys::Outcome;
 use crate::mux::{Axis, ModeKey, PaneId, Rect, Visible, WindowId};
-use crate::renderer::{Line, Overlay, PIXEL_FORMAT, PaneDraw, RectInstance};
+use crate::renderer::{Line, Overlay, PIXEL_FORMAT, PaneDraw, RectInstance, Tint};
 use crate::terminal::{CellStyle, Highlight, KeyInput, MouseInput, SearchStatus};
 
 pub struct Ivars {
@@ -602,7 +602,7 @@ impl TerminalView {
                     let preedit = if is_active { marked.as_str() } else { "" };
                     let copy_cursor = modes.iter().find(|(p, _)| *p == id).and_then(|(_, modes)| modes.copy_cursor);
                     let overlay = Overlay { focused: focused && is_active, copy_cursor, preedit };
-                    PaneDraw { id, frame, origin, overlay }
+                    PaneDraw { id, frame, origin, overlay, tint: Tint::NONE }
                 })
                 .collect();
             renderer.render(&ivars.layer, &mut panes, &rects, &chrome, rgb(theme.background));

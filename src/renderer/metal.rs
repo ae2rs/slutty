@@ -41,10 +41,31 @@ impl std::error::Error for RenderError {}
 struct Uniforms {
     viewport: [f32; 2],
     origin: [f32; 2],
+    tint: Tint,
 }
 
 type Device = ProtocolObject<dyn MTLDevice>;
 type Pipeline = Retained<ProtocolObject<dyn MTLRenderPipelineState>>;
+type Texture = ProtocolObject<dyn MTLTexture>;
+type Commands = Retained<ProtocolObject<dyn MTLCommandBuffer>>;
+
+/// Scales a pane's colors in HSV, as WezTerm's `inactive_pane_hsb` does.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tint {
+    pub saturation: f32,
+    pub brightness: f32,
+}
+
+impl Tint {
+    pub const NONE: Self = Self { saturation: 1.0, brightness: 1.0 };
+}
+
+impl Default for Tint {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
 
 /// One pane to draw: its frame, where it goes, and what lies on top.
 pub struct PaneDraw<'a> {
@@ -53,6 +74,7 @@ pub struct PaneDraw<'a> {
     /// Top-left corner in device pixels.
     pub origin: [f32; 2],
     pub overlay: Overlay<'a>,
+    pub tint: Tint,
 }
 
 pub struct Renderer {
@@ -130,6 +152,29 @@ impl Renderer {
         chrome: &[Line],
         clear: Rgb,
     ) {
+        let Some(drawable) = layer.nextDrawable() else {
+            log::warn!("no drawable; skipping a frame");
+            return;
+        };
+        match self.draw(&drawable.texture(), panes, rects, chrome, clear) {
+            Ok(commands) => {
+                commands.presentDrawable(ProtocolObject::<dyn MTLDrawable>::from_ref(&*drawable));
+                commands.commit();
+            }
+            Err(e) => log::error!("drawing failed: {e}"),
+        }
+    }
+
+    /// Encodes the panes, `rects` and `chrome` into `target`. The caller
+    /// commits the commands.
+    fn draw(
+        &mut self,
+        target: &Texture,
+        panes: &mut [PaneDraw<'_>],
+        rects: &[RectInstance],
+        chrome: &[Line],
+        clear: Rgb,
+    ) -> Result<Commands, RenderError> {
         self.scenes.retain(|id, _| panes.iter().any(|p| p.id == *id));
         if self.build(panes, chrome).is_err() {
             log::info!("glyph atlas full; starting over");
@@ -141,16 +186,11 @@ impl Renderer {
         }
         self.upload_glyphs();
 
-        let Some(drawable) = layer.nextDrawable() else {
-            log::warn!("no drawable; skipping a frame");
-            return;
-        };
-        let size = layer.drawableSize();
-        let viewport = [size.width as f32, size.height as f32];
+        let viewport = [target.width() as f32, target.height() as f32];
         let mut batches = Vec::new();
         for pane in panes.iter() {
             let Some(s) = self.scenes.get(&pane.id) else { continue };
-            let uniforms = Uniforms { viewport, origin: pane.origin };
+            let uniforms = Uniforms { viewport, origin: pane.origin, tint: pane.tint };
             batches.extend([
                 (uniforms, Batch::Rects(&s.rects)),
                 (uniforms, Batch::Glyphs(&s.glyphs)),
@@ -158,15 +198,13 @@ impl Renderer {
                 (uniforms, Batch::Glyphs(&s.overlay_glyphs)),
             ]);
         }
-        let screen = Uniforms { viewport, origin: [0.0, 0.0] };
+        let screen = Uniforms { viewport, origin: [0.0, 0.0], tint: Tint::NONE };
         batches.extend([
             (screen, Batch::Rects(rects)),
             (screen, Batch::Rects(&self.chrome.rects)),
             (screen, Batch::Glyphs(&self.chrome.glyphs)),
         ]);
-        if let Err(e) = self.encode(&drawable, &batches, clear) {
-            log::error!("drawing failed: {e}");
-        }
+        self.encode(target, &batches, clear)
     }
 
     fn build(&mut self, panes: &mut [PaneDraw<'_>], chrome: &[Line]) -> Result<(), Full> {
@@ -194,16 +232,11 @@ impl Renderer {
     }
 
     /// Draws each batch with its uniforms, in order.
-    fn encode(
-        &self,
-        drawable: &ProtocolObject<dyn CAMetalDrawable>,
-        batches: &[(Uniforms, Batch<'_>)],
-        clear: Rgb,
-    ) -> Result<(), RenderError> {
+    fn encode(&self, target: &Texture, batches: &[(Uniforms, Batch<'_>)], clear: Rgb) -> Result<Commands, RenderError> {
         let pass = MTLRenderPassDescriptor::new();
         // SAFETY: index 0 always exists.
         let color = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
-        color.setTexture(Some(&drawable.texture()));
+        color.setTexture(Some(target));
         color.setLoadAction(MTLLoadAction::Clear);
         color.setStoreAction(MTLStoreAction::Store);
         let c = |v: u8| f64::from(v) / 255.0;
@@ -233,9 +266,7 @@ impl Renderer {
             }
         }
         encoder.endEncoding();
-        commands.presentDrawable(ProtocolObject::<dyn MTLDrawable>::from_ref(drawable));
-        commands.commit();
-        Ok(())
+        Ok(commands)
     }
 }
 
@@ -306,4 +337,74 @@ fn pipeline(
 
 fn err(message: &str) -> RenderError {
     RenderError(message.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use objc2_metal::MTLStorageMode;
+
+    use super::*;
+    use crate::terminal::{Cell, CellStyle, Grapheme, Row};
+
+    /// Draws one blank pane of `background` under `tint` off screen, and
+    /// reads back its top-left pixel as RGBA.
+    fn pixel(background: Rgb, tint: Tint) -> [u8; 4] {
+        let fonts = Fonts::new(&crate::config::Font::default(), 32.0).expect("fonts");
+        let mut renderer = Renderer::new(fonts).expect("renderer");
+        let (width, height) = (8, 8);
+        // SAFETY: valid format and size.
+        let descriptor = unsafe {
+            MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                PIXEL_FORMAT,
+                width,
+                height,
+                false,
+            )
+        };
+        descriptor.setUsage(MTLTextureUsage::RenderTarget);
+        descriptor.setStorageMode(MTLStorageMode::Shared);
+        let target = renderer.device.newTextureWithDescriptor(&descriptor).expect("texture");
+
+        let blank = Cell { text: Grapheme::Empty, fg: background, bg: None, style: CellStyle::default() };
+        let frame = RefCell::new(Frame {
+            cols: 2,
+            rows: vec![Row { cells: vec![blank; 2], dirty: true }],
+            background,
+            foreground: background,
+            cursor: None,
+            changed: true,
+        });
+        let overlay = Overlay { focused: false, copy_cursor: None, preedit: "" };
+        let id = "1".parse().expect("pane id");
+        let mut panes = [PaneDraw { id, frame: frame.borrow_mut(), origin: [0.0, 0.0], overlay, tint }];
+        let black = Rgb { r: 0, g: 0, b: 0 };
+        let commands = renderer.draw(&target, &mut panes, &[], &[], black).expect("drawn");
+        commands.commit();
+        commands.waitUntilCompleted();
+
+        let mut bgra = [0u8; 4];
+        let region =
+            MTLRegion { origin: MTLOrigin { x: 0, y: 0, z: 0 }, size: MTLSize { width: 1, height: 1, depth: 1 } };
+        let bytes = NonNull::new(bgra.as_mut_ptr().cast::<c_void>()).expect("non-null");
+        // SAFETY: one BGRA pixel fits in `bgra`, and the region is inside the texture.
+        unsafe { target.getBytes_bytesPerRow_fromRegion_mipmapLevel(bytes, 4 * width, region, 0) };
+        let [b, g, r, a] = bgra;
+        [r, g, b, a]
+    }
+
+    #[test]
+    fn an_untinted_pane_keeps_its_background() {
+        assert_eq!(pixel(Rgb { r: 200, g: 40, b: 40 }, Tint::NONE), [200, 40, 40, 255]);
+    }
+
+    #[test]
+    fn a_tint_scales_saturation_and_brightness() {
+        // Saturation 0.5 moves each channel halfway to the largest; brightness
+        // 0.5 then halves all three: (200, 120, 120) -> (100, 60, 60).
+        let [r, g, b, _] = pixel(Rgb { r: 200, g: 40, b: 40 }, Tint { saturation: 0.5, brightness: 0.5 });
+        let near = |got: u8, want: u8| got.abs_diff(want) <= 1;
+        assert!(near(r, 100) && near(g, 60) && near(b, 60), "got {r}, {g}, {b}");
+    }
 }

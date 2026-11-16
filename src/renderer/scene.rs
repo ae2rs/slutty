@@ -81,8 +81,9 @@ struct RowCache {
     glyphs: Vec<GlyphInstance>,
 }
 
-/// One pane's instances in draw order: `rects`, `glyphs`, then the overlay's
-/// rects and glyphs (cursor, preedit) on top, relative to the pane.
+/// One pane's instances in draw order: `rects` (the pane's background
+/// first), `glyphs`, then the overlay's rects and glyphs (cursor, preedit) on
+/// top, relative to the pane.
 #[derive(Default)]
 pub struct Scene {
     rows: Vec<RowCache>,
@@ -129,6 +130,10 @@ impl Scene {
 
         self.rects.clear();
         self.glyphs.clear();
+        // The pane's own background, so its tint covers the empty cells too.
+        let m = fonts.metrics();
+        let size = [f32::from(frame.cols) * m.cell_width as f32, frame.rows.len() as f32 * m.cell_height as f32];
+        self.rects.push(rect(0.0, 0.0, size[0], size[1], frame.background));
         for row in &self.rows {
             self.rects.extend_from_slice(&row.rects);
             self.glyphs.extend_from_slice(&row.glyphs);
@@ -407,8 +412,8 @@ mod tests {
         t.write(b"a b\x1b[41m  \x1b[0m");
         scene.build(&mut t.frame(), &FOCUSED, &fonts, &mut atlas).expect("room");
         assert_eq!(scene.glyphs.len(), 2);
-        assert_eq!(scene.rects.len(), 1);
-        assert_eq!(scene.rects[0].size[0], 2.0 * fonts.metrics().cell_width as f32);
+        assert_eq!(scene.rects.len(), 2, "the pane's background and one merged red run");
+        assert_eq!(scene.rects[1].size[0], 2.0 * fonts.metrics().cell_width as f32);
         assert_eq!(scene.overlay_rects.len(), 1, "bar cursor");
     }
 

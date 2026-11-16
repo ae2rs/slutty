@@ -5,6 +5,8 @@ using namespace metal;
 struct Uniforms {
     float2 viewport;
     float2 origin;
+    // Saturation and brightness factors, as WezTerm's inactive_pane_hsb.
+    float2 tint;
 };
 
 struct RectInstance {
@@ -32,11 +34,20 @@ struct GlyphOut {
     float2 uv;
     half4 color;
     uint colored [[flat]];
+    float2 tint [[flat]];
 };
 
 static float4 clip(float2 px, constant Uniforms& u) {
     float2 p = (px + u.origin) / u.viewport * 2.0 - 1.0;
     return float4(p.x, -p.y, 0.0, 1.0);
+}
+
+// Scaling HSV saturation by s moves each channel toward the largest one;
+// brightness scales all three. Both are linear, so premultiplied colors
+// work as they are.
+static half3 tint(half3 c, float2 t) {
+    half top = max(c.r, max(c.g, c.b));
+    return mix(half3(top), c, half(t.x)) * half(t.y);
 }
 
 // Triangle strip corners: (0,0) (1,0) (0,1) (1,1).
@@ -54,7 +65,7 @@ vertex RectOut rect_vertex(
     RectOut out;
     out.position = clip(r.pos + corner(vid) * r.size, u);
     half4 c = half4(r.color) / 255.0h;
-    out.color = half4(c.rgb * c.a, c.a);
+    out.color = half4(tint(c.rgb, u.tint) * c.a, c.a);
     return out;
 }
 
@@ -74,7 +85,9 @@ vertex GlyphOut glyph_vertex(
     out.position = clip(g.pos + c * g.size, u);
     out.uv = g.uv + c * g.size;
     out.color = half4(g.color) / 255.0h;
+    out.color.rgb = tint(out.color.rgb, u.tint);
     out.colored = g.colored;
+    out.tint = u.tint;
     return out;
 }
 
@@ -83,7 +96,7 @@ fragment half4 glyph_fragment(GlyphOut in [[stage_in]], texture2d<half> atlas [[
     // The atlas is premultiplied; text is white, so alpha is its coverage.
     half4 t = atlas.sample(s, in.uv);
     if (in.colored != 0) {
-        return t;
+        return half4(tint(t.rgb, in.tint), t.a);
     }
     return half4(in.color.rgb, 1.0h) * (t.a * in.color.a);
 }
