@@ -3,19 +3,12 @@
 
 use std::collections::HashMap;
 
-use crate::font::{Bitmap, Face, Fonts};
-use crate::terminal::Grapheme;
+use crate::font::{Bitmap, FontId, Fonts};
 
 pub const ATLAS_SIZE: u32 = 2048;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct Key {
-    text: Grapheme,
-    face: Face,
-    cells: u8,
-}
-
-/// A glyph's place in the atlas and its offset from the cell corner.
+/// A glyph's place in the atlas and its offset from the pen, at the cell's
+/// top.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Glyph {
     pub x: u32,
@@ -38,7 +31,7 @@ pub struct Upload {
 
 #[derive(Default)]
 pub struct Atlas {
-    glyphs: HashMap<Key, Option<Glyph>>,
+    glyphs: HashMap<(FontId, u16), Option<Glyph>>,
     shelf_x: u32,
     shelf_y: u32,
     shelf_height: u32,
@@ -46,19 +39,14 @@ pub struct Atlas {
 }
 
 impl Atlas {
-    /// The glyph for `text`, rasterised on first use. `None` if it has no ink.
-    pub fn glyph(&mut self, fonts: &Fonts, text: &Grapheme, face: Face, cells: u8) -> Result<Option<Glyph>, Full> {
-        let key = Key { text: text.clone(), face, cells };
+    /// Glyph `glyph` of `font`, rasterised on first use. `None` if it has no
+    /// ink.
+    pub fn glyph(&mut self, fonts: &Fonts, font: FontId, glyph: u16) -> Result<Option<Glyph>, Full> {
+        let key = (font, glyph);
         if let Some(glyph) = self.glyphs.get(&key) {
             return Ok(*glyph);
         }
-        let mut buf = [0; 4];
-        let string = match text {
-            Grapheme::Empty => return Ok(None),
-            Grapheme::Char(c) => &*c.encode_utf8(&mut buf),
-            Grapheme::Cluster(s) => s,
-        };
-        let glyph = match fonts.rasterize(string, face, u32::from(cells)) {
+        let glyph = match fonts.rasterize(font, glyph) {
             Some(bitmap) => Some(self.place(bitmap)?),
             None => None,
         };

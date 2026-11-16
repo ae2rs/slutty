@@ -1,5 +1,6 @@
 //! Turns a frame into GPU instances. Each row's instances are kept, so only
-//! rows libghostty marked dirty are rebuilt.
+//! rows libghostty marked dirty, and rows the cursor left or entered, are
+//! rebuilt.
 
 use libghostty_vt::color::Rgb;
 use libghostty_vt::unicode;
@@ -60,14 +61,18 @@ impl Line {
 
     /// Appends `text`, one cell per character (two for wide ones).
     pub fn push_str(&mut self, text: &str, fg: Rgb, style: CellStyle) {
-        for c in text.chars() {
-            let wide = unicode::codepoint_width(c) > 1;
-            self.cells.push(Cell { text: Grapheme::Char(c), fg, bg: None, style: CellStyle { wide, ..style } });
-            if wide {
-                self.cells.push(Cell { text: Grapheme::Empty, fg, bg: None, style });
-            }
-        }
+        self.cells.extend(text_cells(text, fg, style));
     }
+}
+
+/// `text` as cells, one per character (two for wide ones).
+fn text_cells(text: &str, fg: Rgb, style: CellStyle) -> impl Iterator<Item = Cell> {
+    text.chars().flat_map(move |c| {
+        let wide = unicode::codepoint_width(c) > 1;
+        let cell = Cell { text: Grapheme::Char(c), fg, bg: None, style: CellStyle { wide, ..style } };
+        let spacer = wide.then_some(Cell { text: Grapheme::Empty, fg, bg: None, style });
+        std::iter::once(cell).chain(spacer)
+    })
 }
 
 #[derive(Default)]
@@ -82,6 +87,8 @@ struct RowCache {
 pub struct Scene {
     rows: Vec<RowCache>,
     rebuild_all: bool,
+    /// The cell rows were shaped around: runs break at the cursor.
+    split: Option<(u16, u16)>,
     pub rects: Vec<RectInstance>,
     pub glyphs: Vec<GlyphInstance>,
     pub overlay_rects: Vec<RectInstance>,
@@ -107,7 +114,17 @@ impl Scene {
             self.rows.resize_with(frame.rows.len(), RowCache::default);
             self.rebuild_all = true;
         }
-        self.build_rows(frame, fonts, atlas)?;
+        let cursor = cursor(frame, overlay);
+        let split = cursor.map(|c| (c.x, c.y));
+        if split != self.split {
+            for (_, y) in [self.split, split].into_iter().flatten() {
+                if let Some(row) = frame.rows.get_mut(usize::from(y)) {
+                    row.dirty = true;
+                }
+            }
+            self.split = split;
+        }
+        self.build_rows(frame, split, fonts, atlas)?;
         self.rebuild_all = false;
 
         self.rects.clear();
@@ -118,12 +135,18 @@ impl Scene {
         }
         self.overlay_rects.clear();
         self.overlay_glyphs.clear();
-        self.build_overlay(frame, overlay, fonts, atlas);
+        self.build_overlay(frame, overlay, cursor, fonts, atlas)?;
         frame.changed = false;
         Ok(())
     }
 
-    fn build_rows(&mut self, frame: &mut Frame, fonts: &Fonts, atlas: &mut Atlas) -> Result<(), Full> {
+    fn build_rows(
+        &mut self,
+        frame: &mut Frame,
+        split: Option<(u16, u16)>,
+        fonts: &Fonts,
+        atlas: &mut Atlas,
+    ) -> Result<(), Full> {
         let m = fonts.metrics();
         for (y, (row, cache)) in frame.rows.iter_mut().zip(&mut self.rows).enumerate() {
             if !row.dirty && !self.rebuild_all {
@@ -137,45 +160,39 @@ impl Scene {
                 if let Some(bg) = cell.bg.filter(|bg| *bg != frame.background) {
                     push_bg(&mut cache.rects, left, top, m, bg);
                 }
-                if let Some(glyph) = glyph(atlas, fonts, cell)? {
-                    cache.glyphs.push(glyph_instance(glyph, left, top, cell.fg));
-                }
                 decorations(&mut cache.rects, cell, left, top, m);
             }
+            let split = split.filter(|&(_, cy)| usize::from(cy) == y).map(|(x, _)| usize::from(x));
+            push_text(&mut cache.glyphs, &row.cells, [0.0, top], split, None, fonts, atlas)?;
             row.dirty = false;
         }
         Ok(())
     }
 
-    fn build_overlay(&mut self, frame: &Frame, overlay: &Overlay<'_>, fonts: &Fonts, atlas: &mut Atlas) {
+    fn build_overlay(
+        &mut self,
+        frame: &Frame,
+        overlay: &Overlay<'_>,
+        cursor: Option<Cursor>,
+        fonts: &Fonts,
+        atlas: &mut Atlas,
+    ) -> Result<(), Full> {
         let m = fonts.metrics();
-        let cursor = match overlay.copy_cursor {
-            Some((x, y)) => Some(Cursor { x, y, shape: CursorShape::Block, wide: false, color: None }),
-            None => frame.cursor,
-        };
-        let Some(cursor) = cursor else { return };
-        let x = if cursor.wide { cursor.x.saturating_sub(1) } else { cursor.x };
-        let (left, top) = (f32::from(x) * m.cell_width as f32, f32::from(cursor.y) * m.cell_height as f32);
+        let Some(cursor) = cursor else { return Ok(()) };
+        let (left, top) = (f32::from(cursor.x) * m.cell_width as f32, f32::from(cursor.y) * m.cell_height as f32);
         let (cw, ch, stroke) = (m.cell_width as f32, m.cell_height as f32, m.stroke as f32);
 
         if !overlay.preedit.is_empty() {
-            let mut pen = left;
-            for c in overlay.preedit.chars() {
-                let cells = unicode::codepoint_width(c).max(1);
-                let width = cw * f32::from(cells);
-                self.overlay_rects.push(rect(pen, top, width, ch, frame.background));
-                let text = Grapheme::Char(c);
-                if let Ok(Some(g)) = atlas.glyph(fonts, &text, Face::default(), cells) {
-                    self.overlay_glyphs.push(glyph_instance(g, pen, top, frame.foreground));
-                }
-                pen += width;
-            }
+            let cells: Vec<Cell> = text_cells(overlay.preedit, frame.foreground, CellStyle::default()).collect();
+            let width = cw * cells.len() as f32;
+            self.overlay_rects.push(rect(left, top, width, ch, frame.background));
+            push_text(&mut self.overlay_glyphs, &cells, [left, top], None, None, fonts, atlas)?;
             let underline = top + m.underline_offset as f32;
-            self.overlay_rects.push(rect(left, underline, pen - left, stroke, frame.foreground));
-            return;
+            self.overlay_rects.push(rect(left, underline, width, stroke, frame.foreground));
+            return Ok(());
         }
 
-        let under = frame.rows.get(usize::from(cursor.y)).and_then(|row| row.cells.get(usize::from(x)));
+        let under = frame.rows.get(usize::from(cursor.y)).and_then(|row| row.cells.get(usize::from(cursor.x)));
         let width = cw * if under.is_some_and(|c| c.style.wide) { 2.0 } else { 1.0 };
         let color = cursor.color.unwrap_or(frame.foreground);
         let shape =
@@ -184,10 +201,9 @@ impl Scene {
             CursorShape::Block => {
                 self.overlay_rects.push(rect(left, top, width, ch, color));
                 // The text under a block cursor takes the background color.
-                if let Some(cell) = under
-                    && let Ok(Some(g)) = glyph(atlas, fonts, cell)
-                {
-                    self.overlay_glyphs.push(glyph_instance(g, left, top, frame.background));
+                if let Some(cell) = under {
+                    let cell = std::slice::from_ref(cell);
+                    push_text(&mut self.overlay_glyphs, cell, [left, top], None, Some(frame.background), fonts, atlas)?;
                 }
             }
             CursorShape::Bar => self.overlay_rects.push(rect(left, top, stroke.max(2.0), ch, color)),
@@ -201,7 +217,21 @@ impl Scene {
                 ]);
             }
         }
+        Ok(())
     }
+}
+
+/// Where the cursor is drawn: copy mode's, or else the terminal's, on the
+/// first cell of a wide character.
+fn cursor(frame: &Frame, overlay: &Overlay<'_>) -> Option<Cursor> {
+    let mut cursor = match overlay.copy_cursor {
+        Some((x, y)) => Cursor { x, y, shape: CursorShape::Block, wide: false, color: None },
+        None => frame.cursor?,
+    };
+    if cursor.wide {
+        cursor.x = cursor.x.saturating_sub(1);
+    }
+    Some(cursor)
 }
 
 /// Lines outside the grid, relative to the drawable. A few lines, rebuilt
@@ -224,11 +254,9 @@ impl Chrome {
                 if let Some(bg) = cell.bg {
                     push_bg(&mut self.rects, left, line.y, m, bg);
                 }
-                if let Some(glyph) = glyph(atlas, fonts, cell)? {
-                    self.glyphs.push(glyph_instance(glyph, left, line.y, cell.fg));
-                }
                 decorations(&mut self.rects, cell, left, line.y, m);
             }
+            push_text(&mut self.glyphs, &line.cells, [line.x, line.y], None, None, fonts, atlas)?;
         }
         Ok(())
     }
@@ -245,8 +273,62 @@ fn face(style: CellStyle) -> Face {
     Face { weight, italic: style.italic }
 }
 
-fn glyph(atlas: &mut Atlas, fonts: &Fonts, cell: &Cell) -> Result<Option<Glyph>, Full> {
-    atlas.glyph(fonts, &cell.text, face(cell.style), if cell.style.wide { 2 } else { 1 })
+/// Shapes `cells`, starting at `left, top`, in runs of one face, and places
+/// each glyph at the cell it draws, so text keeps to the grid whatever the
+/// font's advances. Runs also end around cell `split`, so the cursor never
+/// sits inside a ligature. Glyphs take their cell's color, or `color`.
+fn push_text(
+    out: &mut Vec<GlyphInstance>,
+    cells: &[Cell],
+    [left, top]: [f32; 2],
+    split: Option<usize>,
+    color: Option<Rgb>,
+    fonts: &Fonts,
+    atlas: &mut Atlas,
+) -> Result<(), Full> {
+    let cell_width = fonts.metrics().cell_width as f32;
+    // Trailing blanks draw nothing; leaving them out lets more rows share a shape.
+    let cells = &cells[..cells.iter().rposition(|c| c.text != Grapheme::Empty).map_or(0, |i| i + 1)];
+    let mut text = String::new();
+    // The byte each cell's text starts at, and the cell.
+    let mut starts: Vec<(usize, usize)> = Vec::new();
+    let mut start = 0;
+    while start < cells.len() {
+        let run_face = face(cells[start].style);
+        let mut end = start + 1;
+        while end < cells.len() && face(cells[end].style) == run_face && split != Some(end) && split != Some(end - 1) {
+            end += 1;
+        }
+        text.clear();
+        starts.clear();
+        for x in start..end {
+            // The cell after a wide one is its spacer.
+            if x > 0 && cells[x - 1].style.wide {
+                continue;
+            }
+            starts.push((text.len(), x));
+            match &cells[x].text {
+                Grapheme::Empty => text.push(' '),
+                Grapheme::Char(c) => text.push(*c),
+                Grapheme::Cluster(s) => text.push_str(s),
+            }
+        }
+        // Each cell's glyphs are placed from the pen position of its first.
+        let mut anchor: Option<(usize, f32)> = None;
+        for g in fonts.shape(&text, run_face).iter() {
+            let x = starts[starts.partition_point(|&(byte, _)| byte <= g.byte).saturating_sub(1)].1;
+            let origin = match anchor {
+                Some((cell, origin)) if cell == x => origin,
+                _ => anchor.insert((x, g.x)).1,
+            };
+            if let Some(glyph) = atlas.glyph(fonts, g.font, g.glyph)? {
+                let pen = left + x as f32 * cell_width + (g.x - origin);
+                out.push(glyph_instance(glyph, pen, top, color.unwrap_or(cells[x].fg)));
+            }
+        }
+        start = end;
+    }
+    Ok(())
 }
 
 fn glyph_instance(g: Glyph, left: f32, top: f32, color: Rgb) -> GlyphInstance {
@@ -346,14 +428,27 @@ mod tests {
     }
 
     #[test]
+    fn ligatures_break_at_the_cursor_and_join_again_when_it_leaves() {
+        let (mut t, fonts, mut atlas, mut scene) = setup();
+        t.write(b"a->b");
+        scene.build(&mut t.frame(), &FOCUSED, &fonts, &mut atlas).expect("room");
+        let joined = scene.glyphs.clone();
+        let on_arrow = Overlay { copy_cursor: Some((2, 0)), ..FOCUSED };
+        scene.build(&mut t.frame(), &on_arrow, &fonts, &mut atlas).expect("room");
+        assert_ne!(scene.glyphs, joined, "the cursor's row is shaped again around it");
+        scene.build(&mut t.frame(), &FOCUSED, &fonts, &mut atlas).expect("room");
+        assert_eq!(scene.glyphs, joined);
+    }
+
+    #[test]
     fn preedit_replaces_the_cursor() {
         let (mut t, fonts, mut atlas, mut scene) = setup();
         let overlay = Overlay { focused: true, copy_cursor: None, preedit: "日本" };
         scene.build(&mut t.frame(), &overlay, &fonts, &mut atlas).expect("room");
         assert_eq!(scene.overlay_glyphs.len(), 2);
-        // Two wide backgrounds and an underline.
-        assert_eq!(scene.overlay_rects.len(), 3);
-        assert_eq!(scene.overlay_rects[2].size[0], 4.0 * fonts.metrics().cell_width as f32);
+        // A background and an underline, four cells wide.
+        assert_eq!(scene.overlay_rects.len(), 2);
+        assert_eq!(scene.overlay_rects[1].size[0], 4.0 * fonts.metrics().cell_width as f32);
     }
 
     #[test]
