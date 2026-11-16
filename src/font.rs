@@ -11,8 +11,9 @@ use objc2_core_foundation::{
 };
 use objc2_core_graphics::{CGBitmapContextCreate, CGColorSpace, CGContext, CGImageAlphaInfo, kCGColorSpaceSRGB};
 use objc2_core_text::{
-    CTFont, CTFontDescriptor, CTFontManagerCreateFontDescriptorFromData, CTFontOrientation, CTFontSymbolicTraits, CTLine,
-    kCTFontAttributeName, kCTFontFamilyNameAttribute, kCTFontWeightTrait, kCTForegroundColorFromContextAttributeName,
+    CTFont, CTFontDescriptor, CTFontManagerCreateFontDescriptorFromData, CTFontOrientation, CTFontSymbolicTraits,
+    CTLine, kCTFontAttributeName, kCTFontFamilyNameAttribute, kCTFontWeightTrait,
+    kCTForegroundColorFromContextAttributeName,
 };
 
 use crate::config::{self, FontWeight};
@@ -99,9 +100,9 @@ impl Fonts {
         }
         let pick = |weight: FontWeight, italic: bool| {
             let want = css_weight(weight);
-            let cost = |(css, slanted): &(f64, bool)| (css - want).abs() + if *slanted == italic { 0.0 } else { 1000.0 };
-            let best = candidates.iter().min_by(|a, b| cost(&a.1).total_cmp(&cost(&b.1))).expect("not empty");
-            best.0.clone()
+            let cost = |c: &Candidate| (c.weight - want).abs() + if c.italic == italic { 0.0 } else { 1000.0 };
+            let best = candidates.iter().min_by(|a, b| cost(a).total_cmp(&cost(b))).expect("not empty");
+            best.font.clone()
         };
         let faces = vec![
             pick(FontWeight::Regular, false),
@@ -185,8 +186,16 @@ fn face_index(face: Face) -> usize {
     weight + usize::from(face.italic)
 }
 
-/// The embedded faces, each with its weight and slant.
-fn embedded(size: f64) -> Result<Vec<(CFRetained<CTFont>, (f64, bool))>, FontError> {
+/// A face of the configured family.
+struct Candidate {
+    font: CFRetained<CTFont>,
+    /// As CSS: 400 regular, 700 bold.
+    weight: f64,
+    italic: bool,
+}
+
+/// The embedded faces.
+fn embedded(size: f64) -> Result<Vec<Candidate>, FontError> {
     EMBEDDED
         .iter()
         .map(|bytes| {
@@ -200,7 +209,7 @@ fn embedded(size: f64) -> Result<Vec<(CFRetained<CTFont>, (f64, bool))>, FontErr
 }
 
 /// Every installed face of `family`.
-fn installed(family: &str, size: f64) -> Vec<(CFRetained<CTFont>, (f64, bool))> {
+fn installed(family: &str, size: f64) -> Vec<Candidate> {
     let name = CFString::from_str(family);
     // SAFETY: reading a framework constant.
     let key = unsafe { kCTFontFamilyNameAttribute };
@@ -213,16 +222,14 @@ fn installed(family: &str, size: f64) -> Vec<(CFRetained<CTFont>, (f64, bool))> 
     found.iter().map(|descriptor| with_style(&descriptor, size)).collect()
 }
 
-/// A font from `descriptor`, with its weight as CSS (400 regular, 700 bold)
-/// and whether it is italic.
-fn with_style(descriptor: &CTFontDescriptor, size: f64) -> (CFRetained<CTFont>, (f64, bool)) {
+fn with_style(descriptor: &CTFontDescriptor, size: f64) -> Candidate {
     // SAFETY: valid descriptor; a null matrix means identity.
     let font = unsafe { CTFont::with_font_descriptor(descriptor, size, std::ptr::null()) };
     // SAFETY: plain getters; the traits dictionary maps names to numbers.
     let (symbolic, traits) = unsafe { (font.symbolic_traits(), font.traits()) };
     let traits = unsafe { CFRetained::cast_unchecked::<CFDictionary<CFString, CFNumber>>(traits) };
     let weight = traits.get(unsafe { kCTFontWeightTrait }).and_then(|n| n.as_cgfloat()).unwrap_or(0.0);
-    (font, (ct_to_css(weight), symbolic.contains(CTFontSymbolicTraits::ItalicTrait)))
+    Candidate { font, weight: ct_to_css(weight), italic: symbolic.contains(CTFontSymbolicTraits::ItalicTrait) }
 }
 
 /// CoreText weights (-1 to 1) against CSS weights, from AppKit's NSFontWeight.
