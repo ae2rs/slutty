@@ -9,14 +9,16 @@ app=target/release/slutty.app
 
 cargo build --release --locked
 rm -rf "$app"
-mkdir -p "$app/Contents/MacOS"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp target/release/slutty "$app/Contents/MacOS/slutty"
+cp assets/icon/slutty.icns "$app/Contents/Resources/slutty.icns"
 cat > "$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key><string>slutty</string>
+    <key>CFBundleIconFile</key><string>slutty</string>
     <key>CFBundleIdentifier</key><string>io.github.ae2rs.slutty</string>
     <key>CFBundleName</key><string>slutty</string>
     <key>CFBundlePackageType</key><string>APPL</string>
@@ -34,6 +36,8 @@ if [ "${1:-}" = "--install" ]; then
     mkdir -p "$HOME/Applications"
     rm -rf "$HOME/Applications/slutty.app"
     cp -R "$app" "$HOME/Applications/"
+    # Finder and the Dock cache icons by modification date.
+    touch "$HOME/Applications/slutty.app"
     echo "installed $HOME/Applications/slutty.app"
 else
     echo "built $app"
