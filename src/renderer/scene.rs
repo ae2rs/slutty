@@ -242,9 +242,11 @@ mod tests {
             height: 126,
             padding_left: 19,
             padding_top: 0,
+            padding_right: 19,
+            padding_bottom: 0,
         };
         let terminal = Terminal::new(geometry, &Config::default()).expect("terminal");
-        (terminal, Fonts::new(32.0).expect("fonts"), Atlas::default(), Scene::default())
+        (terminal, Fonts::new(&crate::config::Font::default(), 32.0).expect("fonts"), Atlas::default(), Scene::default())
     }
 
     const FOCUSED: Overlay<'static> = Overlay { focused: true, preedit: "" };

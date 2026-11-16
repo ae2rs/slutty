@@ -24,7 +24,7 @@ use objc2_foundation::{
 use objc2_quartz_core::{CADisplayLink, CALayer, CAMetalLayer, kCAGravityTopLeft};
 
 use super::keys;
-use crate::config::{Config, OptionAsAlt};
+use crate::config::{Config, OptionAsAlt, Padding};
 use crate::font::{Fonts, Metrics};
 use crate::mux::{Event, Mux};
 use crate::renderer::{Overlay, PIXEL_FORMAT, Renderer};
@@ -110,7 +110,7 @@ define_class!(
                 if state.scale == scale {
                     return false;
                 }
-                match Fonts::new(state.config.font.size * scale) {
+                match Fonts::new(&state.config.font, state.config.font.size * scale) {
                     Ok(fonts) => state.renderer.set_fonts(fonts),
                     Err(err) => log::error!("loading fonts failed: {err}"),
                 }
@@ -361,7 +361,7 @@ impl TerminalView {
         view.setWantsLayer(true);
         view.setLayerContentsRedrawPolicy(NSViewLayerContentsRedrawPolicy::Never);
 
-        let geometry = geometry(frame.size, scale, renderer.metrics(), config.window.padding_cells);
+        let geometry = geometry(frame.size, scale, renderer.metrics(), config.window.padding);
         match Mux::spawn(geometry, &config, wake_from_any_thread) {
             Ok(mux) => {
                 *view.ivars().state.borrow_mut() =
@@ -477,7 +477,7 @@ impl TerminalView {
     fn relayout(&self) {
         let size = self.bounds().size;
         let resized = self.with_state(|state| {
-            let geometry = geometry(size, state.scale, state.renderer.metrics(), state.config.window.padding_cells);
+            let geometry = geometry(size, state.scale, state.renderer.metrics(), state.config.window.padding);
             self.ivars().layer.setDrawableSize(NSSize::new(f64::from(geometry.width), f64::from(geometry.height)));
             state.mux.resize(geometry);
         });
@@ -593,21 +593,33 @@ impl TerminalView {
 }
 
 /// The view's size in device pixels, as a grid of cells with padding.
-fn geometry(size: NSSize, scale: f64, m: Metrics, padding_cells: u16) -> Geometry {
+fn geometry(size: NSSize, scale: f64, m: Metrics, padding: Padding) -> Geometry {
     let width = (size.width * scale).round().max(0.0) as u32;
     let height = (size.height * scale).round().max(0.0) as u32;
-    let padding = m.cell_width * u32::from(padding_cells);
+    let [left, right, top, bottom] = padding_pixels(padding, m, scale);
     let fit = |space: u32, cell: u32| u16::try_from((space / cell).max(1)).unwrap_or(u16::MAX);
     Geometry {
-        cols: fit(width.saturating_sub(2 * padding), m.cell_width),
-        rows: fit(height, m.cell_height),
+        cols: fit(width.saturating_sub(left + right), m.cell_width),
+        rows: fit(height.saturating_sub(top + bottom), m.cell_height),
         cell_width: m.cell_width,
         cell_height: m.cell_height,
         width,
         height,
-        padding_left: padding,
-        padding_top: 0,
+        padding_left: left,
+        padding_top: top,
+        padding_right: right,
+        padding_bottom: bottom,
     }
+}
+
+/// Left, right, top and bottom padding in device pixels.
+fn padding_pixels(p: Padding, m: Metrics, scale: f64) -> [u32; 4] {
+    [
+        p.left.pixels(m.cell_width, scale),
+        p.right.pixels(m.cell_width, scale),
+        p.top.pixels(m.cell_height, scale),
+        p.bottom.pixels(m.cell_height, scale),
+    ]
 }
 
 /// The text of an NSString or NSAttributedString from the input system.
@@ -623,9 +635,9 @@ fn string_of(object: &AnyObject) -> String {
 
 /// Window content size, in points, that fits `cols` x `rows` cells.
 pub fn content_size(config: &Config, m: Metrics, scale: f64) -> NSSize {
-    let cols = u32::from(config.window.cols + 2 * config.window.padding_cells);
+    let [left, right, top, bottom] = padding_pixels(config.window.padding, m, scale);
     NSSize::new(
-        f64::from(cols * m.cell_width) / scale,
-        f64::from(u32::from(config.window.rows) * m.cell_height) / scale,
+        f64::from(u32::from(config.window.cols) * m.cell_width + left + right) / scale,
+        f64::from(u32::from(config.window.rows) * m.cell_height + top + bottom) / scale,
     )
 }

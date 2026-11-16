@@ -34,6 +34,8 @@ pub struct Geometry {
     pub height: u32,
     pub padding_left: u32,
     pub padding_top: u32,
+    pub padding_right: u32,
+    pub padding_bottom: u32,
 }
 
 /// One key event, already translated by the platform.
@@ -301,9 +303,9 @@ impl Terminal {
                 cell_width: g.cell_width,
                 cell_height: g.cell_height,
                 padding_top: g.padding_top,
-                padding_bottom: 0,
+                padding_bottom: g.padding_bottom,
                 padding_left: g.padding_left,
-                padding_right: g.padding_left,
+                padding_right: g.padding_right,
             })?
             .set_any_button_pressed(self.buttons_down > 0)
             .set_track_last_cell(true)
@@ -392,6 +394,8 @@ mod tests {
             height: 48,
             padding_left: 8,
             padding_top: 0,
+            padding_right: 8,
+            padding_bottom: 0,
         };
         Terminal::new(geometry, &Config::default()).expect("terminal")
     }
