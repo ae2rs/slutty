@@ -35,6 +35,37 @@ pub enum Action {
         sticky: bool,
     },
     PopTable,
+    NewTab,
+    CloseTab {
+        /// Ask first when something other than a shell runs in it.
+        #[serde(default)]
+        confirm: bool,
+    },
+    ActivateTab {
+        index: TabIndex,
+    },
+    ToggleTabBar,
+}
+
+/// A tab by position: 1 is the first, -1 the last.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "i32")]
+pub struct TabIndex(i32);
+
+impl TabIndex {
+    /// The index into `count` tabs, if there is such a tab.
+    pub fn resolve(self, count: usize) -> Option<usize> {
+        let n = usize::try_from(self.0.unsigned_abs()).ok()?;
+        if self.0 > 0 { Some(n - 1).filter(|&i| i < count) } else { count.checked_sub(n) }
+    }
+}
+
+impl TryFrom<i32> for TabIndex {
+    type Error = &'static str;
+
+    fn try_from(index: i32) -> Result<Self, Self::Error> {
+        if index == 0 { Err("tabs count from 1, or from -1 for the last") } else { Ok(Self(index)) }
+    }
 }
 
 /// A binding's value in the config: an action, or `"none"` to remove a
@@ -70,5 +101,21 @@ impl<'de> Deserialize<'de> for Spec {
         }
 
         deserializer.deserialize_any(SpecVisitor)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tab_indexes_count_from_either_end() {
+        assert_eq!(TabIndex(1).resolve(3), Some(0));
+        assert_eq!(TabIndex(3).resolve(3), Some(2));
+        assert_eq!(TabIndex(4).resolve(3), None);
+        assert_eq!(TabIndex(-1).resolve(3), Some(2));
+        assert_eq!(TabIndex(-3).resolve(3), Some(0));
+        assert_eq!(TabIndex(-4).resolve(3), None);
+        assert!(TabIndex::try_from(0).is_err());
     }
 }

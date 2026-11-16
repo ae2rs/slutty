@@ -14,6 +14,33 @@
 "cmd+0" = "reset-font-size"
 "ctrl+0" = "reset-font-size"
 
+"leader t" = "new-tab"
+"cmd+t" = "new-tab"
+"ctrl+shift+t" = "new-tab"
+"cmd+w" = { action = "close-tab", confirm = true }
+"ctrl+shift+w" = { action = "close-tab", confirm = true }
+"leader 1" = { action = "activate-tab", index = 1 }
+"leader 2" = { action = "activate-tab", index = 2 }
+"leader 3" = { action = "activate-tab", index = 3 }
+"leader 4" = { action = "activate-tab", index = 4 }
+"leader 5" = { action = "activate-tab", index = 5 }
+"leader 6" = { action = "activate-tab", index = 6 }
+"leader 7" = { action = "activate-tab", index = 7 }
+"leader 8" = { action = "activate-tab", index = 8 }
+"leader 9" = { action = "activate-tab", index = 9 }
+"leader 0" = { action = "activate-tab", index = -1 }
+"cmd+1" = { action = "activate-tab", index = 1 }
+"cmd+2" = { action = "activate-tab", index = 2 }
+"cmd+3" = { action = "activate-tab", index = 3 }
+"cmd+4" = { action = "activate-tab", index = 4 }
+"cmd+5" = { action = "activate-tab", index = 5 }
+"cmd+6" = { action = "activate-tab", index = 6 }
+"cmd+7" = { action = "activate-tab", index = 7 }
+"cmd+8" = { action = "activate-tab", index = 8 }
+"cmd+9" = { action = "activate-tab", index = 9 }
+"leader Z" = "toggle-tab-bar"
+"cmd+Z" = "toggle-tab-bar"
+
 "leader R" = "reload-config"
 "cmd+R" = "reload-config"
 "alt+enter" = "toggle-fullscreen"
