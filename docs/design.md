@@ -262,3 +262,53 @@ Taken from `~/dotfiles/wezterm/.config/wezterm/`. Milestones refer to the [roadm
 - **Character select** (`ctrl+shift+u`). macOS has `ctrl+cmd+space`.
 - **Debug overlay** (`ctrl+shift+l`). Logs replace it.
 - **Command palette** (`cmd+shift+p`). Maybe later; not on the roadmap.
+
+## Roadmap
+
+Each milestone is one PR. Each must keep the idle rule: no work while nothing changes.
+
+### M1: MVP
+
+- One window, one pane, the login shell.
+- Metal renderer with damage-driven frames.
+- Keys through libghostty, IME, Option as Alt on the left.
+- Scrollback with the wheel. Copy and paste.
+- Hardcoded font and theme.
+
+### M2: Config and keybindings
+
+- Load `~/.config/slutty/slutty.toml`. Reload when the file changes (FSEvents, no polling).
+- Fonts, weights, colors, padding, scrollback size.
+- Key engine: leader, chords, key tables, `send` actions, font size, quit confirm.
+
+### M3: Tabs and tab bar
+
+- Tabs in the mux. Spawn, close, activate by index.
+- Tab bar drawn by the renderer in the titlebar area. Redrawn only when a tab changes.
+- Window title `[i/n] title`. Toggle tab bar.
+
+### M4: Splits
+
+- Split tree per tab. Split, close, focus by direction, resize, zoom, rotate, pane select.
+- One renderer pass per pane into the same drawable. Damage per pane.
+
+### M5: Selection, copy mode, search
+
+- Mouse selection and copy.
+- Copy mode with vim keys. Search. Quick select. Open URL.
+
+### M6: Windows and rho
+
+- Several windows. New window. Pop pane or tab out. Fullscreen.
+- User vars through `on_unknown_sequence`. rho activity glyph, transcript copy mode, `focus_pane`, AeroSpace focus.
+
+### M7: Font shaping
+
+- Shape runs with CoreText. Ligatures. Better fallback.
+
+### M8: Polish
+
+- Cursor blink with an idle cut-off. Blinking text.
+- Optional status widgets, off by default.
+
+WezTerm parity for my use is reached after M6.
