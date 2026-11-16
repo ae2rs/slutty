@@ -66,6 +66,7 @@ mod tests {
             [terminal]
             scrollback_lines = 10_000
             cursor = "block"
+            cursor_blink = true
             option_as_alt = "both"
 
             [mouse]
@@ -77,6 +78,7 @@ mod tests {
         )
         .expect("valid");
         assert_eq!(config.font.size, 14.0);
+        assert!(config.terminal.cursor_blink);
         assert_eq!(config.font.faint_weight, FontWeight::Light);
         assert_eq!(config.theme.background, [0, 0, 0]);
         assert_eq!(config.theme.ansi[15], [0, 0, 8]);

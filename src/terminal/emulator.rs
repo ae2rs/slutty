@@ -242,7 +242,7 @@ impl Terminal {
             .set_default_bg_color(Some(rgb(theme.background)))?
             .set_default_cursor_color(Some(rgb(theme.cursor)))?
             .set_default_cursor_style(Some(cursor_style(config.terminal.cursor)))?
-            .set_default_cursor_blink(Some(false))?
+            .set_default_cursor_blink(Some(config.terminal.cursor_blink))?
             .set_default_color_palette(Some(xterm_palette(&theme.ansi)))?;
         self.shared.selection_colors.set(SelectionColors::new(theme));
         self.shared.full_redraw.set(true);

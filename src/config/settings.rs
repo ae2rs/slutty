@@ -171,12 +171,20 @@ impl<'de> Deserialize<'de> for Length {
 pub struct Terminal {
     pub scrollback_lines: usize,
     pub cursor: CursorShape,
+    /// Whether the cursor blinks until a program says otherwise, as
+    /// WezTerm's `default_cursor_style`.
+    pub cursor_blink: bool,
     pub option_as_alt: OptionAsAlt,
 }
 
 impl Default for Terminal {
     fn default() -> Self {
-        Self { scrollback_lines: 100_000, cursor: CursorShape::Bar, option_as_alt: OptionAsAlt::Left }
+        Self {
+            scrollback_lines: 100_000,
+            cursor: CursorShape::Bar,
+            cursor_blink: false,
+            option_as_alt: OptionAsAlt::Left,
+        }
     }
 }
 
