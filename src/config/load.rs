@@ -38,7 +38,7 @@ pub fn parse(text: &str) -> Result<Config, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::settings::{FontWeight, Length};
+    use crate::config::settings::{FontWeight, Length, Stat};
 
     #[test]
     fn an_empty_file_is_the_defaults() {
@@ -74,11 +74,16 @@ mod tests {
 
             [keys]
             leader = "ctrl+a"
+
+            [tab_bar]
+            status = ["cpu", "ram", "net", "disk"]
             "##,
         )
         .expect("valid");
         assert_eq!(config.font.size, 14.0);
         assert!(config.terminal.cursor_blink);
+        assert_eq!(config.tab_bar.status, [Stat::Cpu, Stat::Ram, Stat::Net, Stat::Disk]);
+        assert!(Config::default().tab_bar.status.is_empty(), "off by default");
         assert_eq!(config.font.faint_weight, FontWeight::Light);
         assert_eq!(config.theme.background, [0, 0, 0]);
         assert_eq!(config.theme.ansi[15], [0, 0, 8]);

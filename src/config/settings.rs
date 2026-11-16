@@ -28,12 +28,29 @@ pub struct TabBar {
     pub enabled: bool,
     /// The widest a tab grows, in cells.
     pub max_width: u16,
+    /// System stats on the right, in this order. They refresh on a timer
+    /// while a window has focus, so none show by default.
+    pub status: Vec<Stat>,
 }
 
 impl Default for TabBar {
     fn default() -> Self {
-        Self { enabled: true, max_width: 32 }
+        Self { enabled: true, max_width: 32, status: Vec::new() }
     }
+}
+
+/// A system stat the tab bar can show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Stat {
+    /// Memory apps use, as Activity Monitor's "Memory Used".
+    Ram,
+    /// Busy share of every core.
+    Cpu,
+    /// Bytes a second in and out of the Ethernet and Wi-Fi interfaces.
+    Net,
+    /// Share of the data volume in use.
+    Disk,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
