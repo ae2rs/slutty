@@ -2,8 +2,10 @@
 
 use libghostty_vt::key::{self, Mods};
 use objc2::MainThreadOnly;
-use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSApplication, NSPasteboard, NSPasteboardTypeString};
-use objc2_foundation::NSString;
+use objc2_app_kit::{
+    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSPasteboard, NSPasteboardTypeString, NSWorkspace,
+};
+use objc2_foundation::{NSString, NSURL};
 
 use super::state::{self, with_app};
 use super::view::TerminalView;
@@ -112,6 +114,15 @@ impl TerminalView {
                 self.tabs_changed();
             }
             Action::PaneSelect => self.start_pane_select(),
+            Action::Copy => self.copy_selection(),
+            Action::CopyMode => self.with_active_pane(|pane| pane.start_copy_mode()),
+            Action::Search => self.with_active_pane(|pane| {
+                // As WezTerm: start from the selected text.
+                let selected = pane.terminal().selection_text().unwrap_or_default();
+                pane.start_search(selected.lines().next().unwrap_or_default());
+            }),
+            Action::QuickSelect => self.start_quick_select(false),
+            Action::OpenUrl => self.start_quick_select(true),
             // The matcher runs these itself.
             Action::KeyTable { .. } | Action::PopTable => {}
         }
@@ -122,7 +133,11 @@ impl TerminalView {
         // SAFETY: a constant AppKit defines.
         if let Some(text) = pasteboard.stringForType(unsafe { NSPasteboardTypeString }) {
             let text = text.to_string();
-            self.with_active_pane(|pane| pane.paste(&text));
+            self.with_active_pane(|pane| {
+                if !pane.paste_into_search(&text) {
+                    pane.paste(&text);
+                }
+            });
         }
     }
 }
@@ -135,6 +150,25 @@ fn set_font_size(size: impl FnOnce(f64, f64) -> f64) {
         app.load_fonts();
     });
     state::views().iter().for_each(|view| view.relayout());
+}
+
+pub(super) fn set_clipboard(text: &str) {
+    let pasteboard = NSPasteboard::generalPasteboard();
+    pasteboard.clearContents();
+    // SAFETY: a constant AppKit defines.
+    pasteboard.setString_forType(&NSString::from_str(text), unsafe { NSPasteboardTypeString });
+}
+
+/// Opens a URL in its default app.
+pub(super) fn open_url(url: &str) {
+    match NSURL::URLWithString(&NSString::from_str(url)) {
+        Some(nsurl) => {
+            if !NSWorkspace::sharedWorkspace().openURL(&nsurl) {
+                log::warn!("opening {url} failed");
+            }
+        }
+        None => log::warn!("not a URL: {url}"),
+    }
 }
 
 /// An alert with a confirm and a cancel button.

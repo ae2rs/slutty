@@ -162,6 +162,9 @@ fn pump() {
     if pump.more {
         wake_from_any_thread();
     }
+    if let Some(text) = &pump.clipboard {
+        super::actions::set_clipboard(text);
+    }
     if let Some(deadline) = deadline {
         schedule_hold_timeout(deadline);
     }

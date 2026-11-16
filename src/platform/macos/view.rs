@@ -12,10 +12,10 @@ use libghostty_vt::key::{self, Key, Mods};
 use libghostty_vt::mouse;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject, Sel};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSEvent, NSEventModifierFlags, NSResponder, NSTextInputClient, NSView, NSViewLayerContentsRedrawPolicy,
-    NSWindowDelegate,
+    NSEvent, NSEventModifierFlags, NSResponder, NSTextInputClient, NSTrackingArea, NSTrackingAreaOptions, NSView,
+    NSViewLayerContentsRedrawPolicy, NSWindowDelegate,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound, NSNotification, NSObject, NSPoint, NSRange,
@@ -24,15 +24,18 @@ use objc2_foundation::{
 use objc2_metal::MTLDevice;
 use objc2_quartz_core::{CADisplayLink, CALayer, CAMetalLayer, kCAGravityTopLeft};
 
+use super::actions;
 use super::keys;
 use super::layout::Layout;
+use super::pointer::Hover;
+use super::quick_select::QuickSelect;
 use super::state::{self, App, with_app};
 use super::tab_bar;
 use crate::config::{self, Config, OptionAsAlt};
 use crate::keys::Outcome;
-use crate::mux::{Axis, PaneId, Rect, Visible, WindowId};
+use crate::mux::{Axis, ModeKey, PaneId, Rect, Visible, WindowId};
 use crate::renderer::{Line, Overlay, PIXEL_FORMAT, PaneDraw, RectInstance};
-use crate::terminal::{CellStyle, KeyInput, MouseInput};
+use crate::terminal::{CellStyle, Highlight, KeyInput, MouseInput, SearchStatus};
 
 pub struct Ivars {
     window: WindowId,
@@ -47,13 +50,21 @@ pub struct Ivars {
     /// Text committed while `keyDown` runs the input method; `None` outside.
     key_texts: RefCell<Option<Vec<String>>>,
     /// Focus, preedit or the tab bar changed: draw even if no pane did.
-    overlay_dirty: Cell<bool>,
+    pub(super) overlay_dirty: Cell<bool>,
     /// The cursor cell in view coordinates, for placing the IME window.
     cursor_rect: Cell<NSRect>,
     /// Fractions of a line left over from trackpad scrolling.
     scroll_remainder: Cell<f64>,
     /// The pane a mouse button went down in; drags and the release go there.
-    mouse_pane: Cell<Option<PaneId>>,
+    pub(super) mouse_pane: Cell<Option<PaneId>>,
+    /// The left button went down to select text, not for the program.
+    pub(super) selecting: Cell<bool>,
+    /// Where a selecting drag is, and whether it selects a rectangle.
+    pub(super) drag: Cell<Option<([f64; 2], bool)>>,
+    /// An autoscroll step is scheduled.
+    pub(super) autoscrolling: Cell<bool>,
+    pub(super) hover: RefCell<Option<Hover>>,
+    pub(super) quick: RefCell<Option<QuickSelect>>,
     /// While picking a pane, each pane's label; empty otherwise.
     pane_labels: RefCell<Vec<(char, PaneId)>>,
 }
@@ -149,33 +160,27 @@ define_class!(
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
-            if self.click_tab_bar(event) {
-                return;
-            }
-            // A click in another pane makes it active, and goes on to it.
-            let point = self.pixel_point(event);
-            let window = self.ivars().window;
-            let pane = with_app(|app| {
-                let (pane, ..) = self.pane_at(app, point)?;
-                if app.mux.active_pane(window) != Some(pane) {
-                    app.mux.activate_pane(window, pane);
-                }
-                Some(pane)
-            });
-            self.ivars().mouse_pane.set(pane.flatten());
-            self.tabs_changed();
-            self.send_mouse(event, mouse::Action::Press, Some(mouse::Button::Left));
+            self.left_down(event);
         }
 
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, event: &NSEvent) {
-            self.send_mouse(event, mouse::Action::Release, Some(mouse::Button::Left));
-            self.ivars().mouse_pane.set(None);
+            self.left_up(event);
         }
 
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, event: &NSEvent) {
-            self.send_mouse(event, mouse::Action::Motion, Some(mouse::Button::Left));
+            self.left_dragged(event);
+        }
+
+        #[unsafe(method(mouseMoved:))]
+        fn mouse_moved(&self, event: &NSEvent) {
+            self.pointer_moved(event);
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _event: &NSEvent) {
+            self.set_hover(None);
         }
 
         #[unsafe(method(rightMouseDown:))]
@@ -365,6 +370,11 @@ impl TerminalView {
             cursor_rect: Cell::new(NSRect::ZERO),
             scroll_remainder: Cell::new(0.0),
             mouse_pane: Cell::new(None),
+            selecting: Cell::new(false),
+            drag: Cell::new(None),
+            autoscrolling: Cell::new(false),
+            hover: RefCell::new(None),
+            quick: RefCell::new(None),
             pane_labels: RefCell::new(Vec::new()),
         };
         let this = Self::alloc(mtm).set_ivars(ivars);
@@ -385,6 +395,22 @@ impl TerminalView {
         // SAFETY: the main run loop and a valid mode.
         unsafe { link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes) };
         let _ = self.ivars().link.set(link);
+        // Pointer motion over the view, for links and programs that track it.
+        let options = NSTrackingAreaOptions::MouseMoved
+            | NSTrackingAreaOptions::MouseEnteredAndExited
+            | NSTrackingAreaOptions::ActiveInKeyWindow
+            | NSTrackingAreaOptions::InVisibleRect;
+        // SAFETY: the view outlives its tracking area, which it owns.
+        let area = unsafe {
+            NSTrackingArea::initWithRect_options_owner_userInfo(
+                NSTrackingArea::alloc(),
+                NSRect::ZERO,
+                options,
+                Some(self),
+                None,
+            )
+        };
+        self.addTrackingArea(&area);
         self.relayout();
         self.tabs_changed();
     }
@@ -470,6 +496,17 @@ impl TerminalView {
                 chrome.push(banner(err, config, layout));
             }
             let active = mux.active_pane(window);
+            // Read before the frames, which hold the panes borrowed.
+            let modes: Vec<(PaneId, PaneModes)> = mux
+                .layout(window)
+                .panes
+                .iter()
+                .filter_map(|(id, _)| {
+                    let pane = mux.pane_mut(*id)?;
+                    let highlights = pane.search_highlights();
+                    Some((*id, PaneModes { highlights, search: pane.search_status(), copy_cursor: pane.copy_cursor() }))
+                })
+                .collect();
             let Visible { panes: visible, dividers } = mux.visible(window);
             if !overlay_dirty && !visible.iter().any(|(_, _, frame)| frame.changed) {
                 return None;
@@ -504,9 +541,54 @@ impl TerminalView {
                 let Some((_, rect, _)) = visible.iter().find(|(id, ..)| id == pane) else { continue };
                 let [x, y] = cell(rect.x + rect.cols.saturating_sub(3) / 2, rect.y + rect.rows / 2);
                 let mut line = Line::new(x, y, 3.0 * cw, rgb(theme.ansi[4]));
-                let style = CellStyle { bold: true, ..CellStyle::default() };
-                line.push_str(&format!(" {label} "), rgb(theme.background), style);
+                line.push_str(&format!(" {label} "), rgb(theme.background), BOLD);
                 chrome.push(line);
+            }
+            let span_rect = |rect: Rect, row: u16, start: u16, end: u16, color: [u8; 4]| {
+                let size = [f32::from(end.saturating_sub(start)) * cw, ch];
+                RectInstance::new(cell(rect.x + start, rect.y + row), size, color)
+            };
+            let tint = |c: config::Rgb, alpha: u8| [c[0], c[1], c[2], alpha];
+            for (id, modes) in &modes {
+                let Some(&(_, rect, _)) = visible.iter().find(|(p, ..)| p == id) else { continue };
+                for h in &modes.highlights {
+                    let color = if h.current { tint(theme.ansi[3], 128) } else { tint(theme.ansi[4], 80) };
+                    rects.push(span_rect(rect, h.row, h.start, h.end, color));
+                }
+                if let Some(search) = &modes.search {
+                    let [x, y] = cell(rect.x, rect.y + rect.rows.saturating_sub(1));
+                    let mut line = Line::new(x, y, f32::from(rect.cols) * cw, rgb(theme.selection_bg));
+                    let count = match search.current {
+                        Some(current) => format!("{current}/{}", search.total),
+                        None => format!("{} found", search.total),
+                    };
+                    let text = format!(" Search: {}\u{2588}  {count}", search.needle);
+                    let text: String = text.chars().take(usize::from(rect.cols)).collect();
+                    line.push_str(&text, rgb(theme.foreground), CellStyle::default());
+                    chrome.push(line);
+                }
+            }
+            if let Some(quick) = &*ivars.quick.borrow()
+                && let Some(&(_, rect, _)) = visible.iter().find(|(p, ..)| *p == quick.pane)
+            {
+                for m in quick.shown() {
+                    let span = &m.span;
+                    rects.push(span_rect(rect, span.row, span.start, span.end, tint(theme.ansi[4], 80)));
+                    let [x, y] = cell(rect.x + span.start, rect.y + span.row);
+                    let width = m.label.chars().count() as f32 * cw;
+                    let mut line = Line::new(x, y, width, rgb(theme.ansi[3]));
+                    line.push_str(&m.label, rgb(theme.background), BOLD);
+                    chrome.push(line);
+                }
+            }
+            if let Some(hover) = &*ivars.hover.borrow()
+                && let Some(&(_, rect, _)) = visible.iter().find(|(p, ..)| *p == hover.pane)
+            {
+                let [x, y] = cell(rect.x + hover.start, rect.y + hover.row);
+                let width = f32::from(hover.end.saturating_sub(hover.start)) * cw;
+                let [r, g, b] = theme.foreground;
+                let pos = [x, y + m.underline_offset as f32];
+                rects.push(RectInstance::new(pos, [width, stroke], [r, g, b, 255]));
             }
             let mut cursor = None;
             let mut panes: Vec<PaneDraw<'_>> = visible
@@ -518,7 +600,9 @@ impl TerminalView {
                         cursor = Some([origin[0] + f32::from(c.x) * cw, origin[1] + f32::from(c.y) * ch]);
                     }
                     let preedit = if is_active { marked.as_str() } else { "" };
-                    PaneDraw { id, frame, origin, overlay: Overlay { focused: focused && is_active, preedit } }
+                    let copy_cursor = modes.iter().find(|(p, _)| *p == id).and_then(|(_, modes)| modes.copy_cursor);
+                    let overlay = Overlay { focused: focused && is_active, copy_cursor, preedit };
+                    PaneDraw { id, frame, origin, overlay }
                 })
                 .collect();
             renderer.render(&ivars.layer, &mut panes, &rects, &chrome, rgb(theme.background));
@@ -546,7 +630,7 @@ impl TerminalView {
     }
 
     /// A point of a mouse event in device pixels from the view's corner.
-    fn pixel_point(&self, event: &NSEvent) -> [f64; 2] {
+    pub(super) fn pixel_point(&self, event: &NSEvent) -> [f64; 2] {
         let point = self.convertPoint_fromView(event.locationInWindow(), None);
         let s = self.window().map_or(1.0, |w| w.backingScaleFactor());
         [point.x * s, point.y * s]
@@ -554,7 +638,7 @@ impl TerminalView {
 
     /// The pane under a point, or the one a mouse button went down in, with
     /// the point relative to that pane.
-    fn pane_at(&self, app: &mut App, [x, y]: [f64; 2]) -> Option<(PaneId, f32, f32)> {
+    pub(super) fn pane_at(&self, app: &mut App, [x, y]: [f64; 2]) -> Option<(PaneId, f32, f32)> {
         let ivars = self.ivars();
         let layout = ivars.layout.get();
         let m = app.renderer.metrics();
@@ -582,7 +666,7 @@ impl TerminalView {
 
     /// Activates the tab under a click in the tab bar. Returns whether the
     /// click was in the tab bar.
-    fn click_tab_bar(&self, event: &NSEvent) -> bool {
+    pub(super) fn click_tab_bar(&self, event: &NSEvent) -> bool {
         let [x, y] = self.pixel_point(event);
         let Some(cell) = self.ivars().layout.get().tab_bar_cell(x, y) else { return false };
         let tab = self.ivars().tab_cells.borrow().iter().position(|cells| cells.contains(&cell));
@@ -611,13 +695,13 @@ impl TerminalView {
         ctrl
     }
 
-    /// Runs the binding this key press belongs to. Returns whether a binding
-    /// used the key, which then does not reach the program.
+    /// Runs the binding or the pane mode this key press belongs to. Returns
+    /// whether either used the key, which then does not reach the program.
     fn bind_key(&self, event: &NSEvent) -> bool {
         if !self.ivars().marked.borrow().is_empty() {
             return false;
         }
-        if self.pick_pane(event) {
+        if self.pick_pane(event) || self.quick_select_key(event) {
             return true;
         }
         let typed = |flags| event.charactersByApplyingModifiers(flags).and_then(|s| s.to_string().chars().next());
@@ -627,27 +711,65 @@ impl TerminalView {
         else {
             return false;
         };
+        let window = self.ivars().window;
+        // Copy mode and search take keys first, as WezTerm's key tables do,
+        // unless a binding is half typed.
+        let mode = with_app(|app| {
+            if !app.matcher.is_idle() {
+                return None;
+            }
+            Some(app.mux.pane_mut(app.mux.active_pane(window)?)?.mode_key(press))
+        });
+        match mode.flatten() {
+            Some(ModeKey::Used) => {
+                self.swallow(code);
+                self.request_frame();
+                return true;
+            }
+            Some(ModeKey::Closed(text)) => {
+                self.swallow(code);
+                if let Some(text) = text {
+                    actions::set_clipboard(&text);
+                }
+                self.ivars().overlay_dirty.set(true);
+                self.request_frame();
+                return true;
+            }
+            Some(ModeKey::Unused) | None => {}
+        }
         let outcome = with_app(|app| {
             let outcome = app.matcher.press(&app.settings.config.keys, press);
             log::trace!("{press:?}: {outcome:?}");
-            if outcome != Outcome::Unbound {
-                // No key-up comes for keys pressed with command, so keep few.
-                app.swallowed.retain(|&c| c != code);
-                app.swallowed.push(code);
-                if app.swallowed.len() > 8 {
-                    app.swallowed.remove(0);
-                }
-            }
             outcome
         });
-        match outcome {
+        let used = match outcome {
             Some(Outcome::Run(action)) => {
                 self.run_action(action);
                 true
             }
             Some(Outcome::Handled) => true,
-            Some(Outcome::Unbound) | None => false,
+            // A mode keeps the keys it does not know from the program.
+            Some(Outcome::Unbound) | None => with_app(|app| {
+                app.mux.active_pane(window).and_then(|p| app.mux.pane_mut(p)).is_some_and(|p| p.in_mode())
+            })
+            .unwrap_or(false),
+        };
+        if used {
+            self.swallow(code);
         }
+        used
+    }
+
+    /// Keeps the release of a key a binding used from the program.
+    pub(super) fn swallow(&self, code: u16) {
+        with_app(|app| {
+            // No key-up comes for keys pressed with command, so keep few.
+            app.swallowed.retain(|&c| c != code);
+            app.swallowed.push(code);
+            if app.swallowed.len() > 8 {
+                app.swallowed.remove(0);
+            }
+        });
     }
 
     fn option_is_alt(&self, flags: NSEventModifierFlags) -> bool {
@@ -742,7 +864,7 @@ impl TerminalView {
         self.request_frame();
     }
 
-    fn send_mouse(&self, event: &NSEvent, action: mouse::Action, button: Option<mouse::Button>) {
+    pub(super) fn send_mouse(&self, event: &NSEvent, action: mouse::Action, button: Option<mouse::Button>) {
         let mods = keys::mods(event.modifierFlags());
         let point = self.pixel_point(event);
         with_app(|app| {
@@ -803,9 +925,19 @@ fn banner(error: &str, config: &Config, layout: Layout) -> Line {
     let mut line = Line::new(0.0, 0.0, layout.width as f32, rgb(theme.ansi[1]));
     let fits = (layout.width / layout.area.cell_width) as usize;
     let text: String = format!(" {error}").chars().take(fits).collect();
-    line.push_str(&text, rgb(theme.background), CellStyle { bold: true, ..CellStyle::default() });
+    line.push_str(&text, rgb(theme.background), BOLD);
     line
 }
+
+/// What a pane's modes put on screen.
+struct PaneModes {
+    highlights: Vec<Highlight>,
+    search: Option<SearchStatus>,
+    copy_cursor: Option<(u16, u16)>,
+}
+
+const BOLD: CellStyle =
+    CellStyle { bold: true, italic: false, faint: false, underline: false, strikethrough: false, wide: false };
 
 /// Black at a fifth over panes without the keyboard: WezTerm's inactive
 /// panes, at 0.8 brightness.
