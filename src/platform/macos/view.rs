@@ -22,7 +22,7 @@ use objc2_foundation::{
     NSRangePointer, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSUInteger,
 };
 use objc2_metal::MTLDevice;
-use objc2_quartz_core::{CADisplayLink, CALayer, CAMetalLayer, kCAGravityTopLeft};
+use objc2_quartz_core::{CADisplayLink, CALayer};
 
 use super::actions;
 use super::keys;
@@ -34,12 +34,12 @@ use super::tab_bar;
 use crate::config::{self, Config, OptionAsAlt};
 use crate::keys::Outcome;
 use crate::mux::{Axis, ModeKey, PaneId, Rect, Visible, WindowId};
-use crate::renderer::{Line, Overlay, PIXEL_FORMAT, PaneDraw, RectInstance, Tint};
+use crate::renderer::{Line, Overlay, PaneDraw, RectInstance, Surface, Tint};
 use crate::terminal::{CellStyle, Highlight, KeyInput, MouseInput, SearchStatus};
 
 pub struct Ivars {
     window: WindowId,
-    layer: Retained<CAMetalLayer>,
+    surface: RefCell<Surface>,
     link: OnceCell<Retained<CADisplayLink>>,
     layout: Cell<Layout>,
     /// Each tab's cells in the tab bar, for clicks.
@@ -92,7 +92,7 @@ define_class!(
 
         #[unsafe(method_id(makeBackingLayer))]
         fn make_backing_layer(&self) -> Retained<CALayer> {
-            Retained::into_super(self.ivars().layer.clone())
+            Retained::into_super(self.ivars().surface.borrow().layer().clone())
         }
 
         #[unsafe(method(setFrameSize:))]
@@ -105,7 +105,7 @@ define_class!(
         fn view_did_change_backing_properties(&self) {
             let Some(window) = self.window() else { return };
             let scale = window.backingScaleFactor();
-            self.ivars().layer.setContentsScale(scale);
+            self.ivars().surface.borrow().layer().setContentsScale(scale);
             let changed = with_app(|app| {
                 if app.scale == scale {
                     return false;
@@ -352,17 +352,9 @@ impl TerminalView {
         device: &ProtocolObject<dyn MTLDevice>,
         scale: f64,
     ) -> Retained<Self> {
-        let layer = CAMetalLayer::new();
-        layer.setDevice(Some(device));
-        layer.setPixelFormat(PIXEL_FORMAT);
-        layer.setFramebufferOnly(true);
-        layer.setContentsScale(scale);
-        // A stale frame during a resize stays put instead of stretching.
-        layer.setContentsGravity(unsafe { kCAGravityTopLeft });
-
         let ivars = Ivars {
             window,
-            layer,
+            surface: RefCell::new(Surface::new(device, scale)),
             link: OnceCell::new(),
             layout: Cell::new(layout),
             tab_cells: RefCell::new(Vec::new()),
@@ -465,7 +457,8 @@ impl TerminalView {
         });
         let Some(layout) = layout else { return };
         ivars.layout.set(layout);
-        ivars.layer.setDrawableSize(NSSize::new(f64::from(layout.width), f64::from(layout.height)));
+        let size = NSSize::new(f64::from(layout.width), f64::from(layout.height));
+        ivars.surface.borrow().layer().setDrawableSize(size);
         ivars.overlay_dirty.set(true);
         self.draw();
     }
@@ -600,7 +593,8 @@ impl TerminalView {
                     PaneDraw { id, frame, origin, overlay, tint }
                 })
                 .collect();
-            renderer.render(&ivars.layer, &mut panes, &rects, &chrome, rgb(theme.background));
+            let surface = &mut ivars.surface.borrow_mut();
+            renderer.render(surface, &mut panes, &rects, &chrome, rgb(theme.background));
             Some((cursor, m))
         })
         .flatten();

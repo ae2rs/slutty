@@ -5,5 +5,5 @@ mod atlas;
 mod metal;
 mod scene;
 
-pub use metal::{PIXEL_FORMAT, PaneDraw, Renderer, Tint};
+pub use metal::{PaneDraw, Renderer, Surface, Tint};
 pub use scene::{Line, Overlay, RectInstance};

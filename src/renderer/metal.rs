@@ -6,6 +6,7 @@ use std::ptr::NonNull;
 use libghostty_vt::color::Rgb;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
+use objc2_core_foundation::CGSize;
 use objc2_foundation::NSString;
 use objc2_metal::{
     MTLBlendFactor, MTLBuffer, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
@@ -14,7 +15,7 @@ use objc2_metal::{
     MTLRenderPipelineState, MTLResourceOptions, MTLSize, MTLStoreAction, MTLTexture, MTLTextureDescriptor,
     MTLTextureUsage,
 };
-use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
+use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer, kCAGravityTopLeft};
 
 use super::atlas::{ATLAS_SIZE, Atlas, Full};
 use super::scene::{Chrome, GlyphInstance, Line, Overlay, RectInstance, Scene};
@@ -142,21 +143,28 @@ impl Renderer {
         self.scenes.clear();
     }
 
-    /// Draws the panes into `layer` over `clear`, then `rects` (device
-    /// pixels from the top-left), then the `chrome` lines.
+    /// Draws the panes into `surface` over `clear`, then `rects` (device
+    /// pixels from the top-left), then the `chrome` lines. The surface keeps
+    /// the instances.
     pub fn render(
         &mut self,
-        layer: &CAMetalLayer,
+        surface: &mut Surface,
         panes: &mut [PaneDraw<'_>],
         rects: &[RectInstance],
         chrome: &[Line],
         clear: Rgb,
     ) {
-        let Some(drawable) = layer.nextDrawable() else {
+        surface.packed = Some(self.prepare(surface.layer.drawableSize(), panes, rects, chrome, clear));
+        self.present(surface);
+    }
+
+    fn present(&self, surface: &Surface) {
+        let Some(packed) = &surface.packed else { return };
+        let Some(drawable) = surface.layer.nextDrawable() else {
             log::warn!("no drawable; skipping a frame");
             return;
         };
-        match self.draw(&drawable.texture(), panes, rects, chrome, clear) {
+        match self.encode(&drawable.texture(), packed) {
             Ok(commands) => {
                 commands.presentDrawable(ProtocolObject::<dyn MTLDrawable>::from_ref(&*drawable));
                 commands.commit();
@@ -165,16 +173,16 @@ impl Renderer {
         }
     }
 
-    /// Encodes the panes, `rects` and `chrome` into `target`. The caller
-    /// commits the commands.
-    fn draw(
+    /// Builds the instances for a target of `size` pixels and copies them
+    /// into one buffer.
+    fn prepare(
         &mut self,
-        target: &Texture,
+        size: CGSize,
         panes: &mut [PaneDraw<'_>],
         rects: &[RectInstance],
         chrome: &[Line],
         clear: Rgb,
-    ) -> Result<Commands, RenderError> {
+    ) -> Packed {
         self.scenes.retain(|id, _| panes.iter().any(|p| p.id == *id));
         if self.build(panes, chrome).is_err() {
             log::info!("glyph atlas full; starting over");
@@ -186,7 +194,7 @@ impl Renderer {
         }
         self.upload_glyphs();
 
-        let viewport = [target.width() as f32, target.height() as f32];
+        let viewport = [size.width as f32, size.height as f32];
         let mut batches = Vec::new();
         for pane in panes.iter() {
             let Some(s) = self.scenes.get(&pane.id) else { continue };
@@ -204,7 +212,7 @@ impl Renderer {
             (screen, Batch::Rects(&self.chrome.rects)),
             (screen, Batch::Glyphs(&self.chrome.glyphs)),
         ]);
-        self.encode(target, &batches, clear)
+        pack(&self.device, &batches, clear)
     }
 
     fn build(&mut self, panes: &mut [PaneDraw<'_>], chrome: &[Line]) -> Result<(), Full> {
@@ -232,7 +240,7 @@ impl Renderer {
     }
 
     /// Draws each batch with its uniforms, in order.
-    fn encode(&self, target: &Texture, batches: &[(Uniforms, Batch<'_>)], clear: Rgb) -> Result<Commands, RenderError> {
+    fn encode(&self, target: &Texture, packed: &Packed) -> Result<Commands, RenderError> {
         let pass = MTLRenderPassDescriptor::new();
         // SAFETY: index 0 always exists.
         let color = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
@@ -240,27 +248,27 @@ impl Renderer {
         color.setLoadAction(MTLLoadAction::Clear);
         color.setStoreAction(MTLStoreAction::Store);
         let c = |v: u8| f64::from(v) / 255.0;
+        let clear = packed.clear;
         color.setClearColor(MTLClearColor { red: c(clear.r), green: c(clear.g), blue: c(clear.b), alpha: 1.0 });
 
         let commands = self.queue.commandBuffer().ok_or_else(|| err("no command buffer"))?;
         let encoder = commands.renderCommandEncoderWithDescriptor(&pass).ok_or_else(|| err("no encoder"))?;
-        if let Some((buffer, layout)) = pack(&self.device, batches.iter().map(|(_, batch)| batch)) {
+        if let Some(buffer) = &packed.buffer {
             // SAFETY: the uniforms outlive the calls, which copy them; every
             // offset and count describes instances inside `buffer`.
             unsafe {
                 encoder.setFragmentTexture_atIndex(Some(&self.texture), 0);
-                for ((uniforms, _), (offset, count, glyphs)) in batches.iter().zip(layout) {
-                    if count == 0 {
-                        continue;
-                    }
-                    encoder.setVertexBytes_length_atIndex(NonNull::from(uniforms).cast(), size_of::<Uniforms>(), 0);
-                    encoder.setRenderPipelineState(if glyphs { &self.glyph_pipeline } else { &self.rect_pipeline });
-                    encoder.setVertexBuffer_offset_atIndex(Some(&buffer), offset, 1);
+                for batch in packed.batches.iter().filter(|b| b.count > 0) {
+                    let uniforms = NonNull::from(&batch.uniforms).cast();
+                    encoder.setVertexBytes_length_atIndex(uniforms, size_of::<Uniforms>(), 0);
+                    let pipeline = if batch.glyphs { &self.glyph_pipeline } else { &self.rect_pipeline };
+                    encoder.setRenderPipelineState(pipeline);
+                    encoder.setVertexBuffer_offset_atIndex(Some(buffer), batch.offset, 1);
                     encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
                         MTLPrimitiveType::TriangleStrip,
                         0,
                         4,
-                        count,
+                        batch.count,
                     );
                 }
             }
@@ -270,23 +278,55 @@ impl Renderer {
     }
 }
 
+/// A window's layer, and the instances last drawn into it.
+pub struct Surface {
+    layer: Retained<CAMetalLayer>,
+    packed: Option<Packed>,
+}
+
+impl Surface {
+    pub fn new(device: &Device, scale: f64) -> Self {
+        let layer = CAMetalLayer::new();
+        layer.setDevice(Some(device));
+        layer.setPixelFormat(PIXEL_FORMAT);
+        layer.setFramebufferOnly(true);
+        layer.setContentsScale(scale);
+        // A stale frame during a resize stays put instead of stretching.
+        layer.setContentsGravity(unsafe { kCAGravityTopLeft });
+        Self { layer, packed: None }
+    }
+
+    pub fn layer(&self) -> &Retained<CAMetalLayer> {
+        &self.layer
+    }
+}
+
+/// Instances copied into one GPU buffer, and where each batch lies in it.
+struct Packed {
+    /// `None` when there is nothing to draw but the clear color.
+    buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
+    batches: Vec<Placed>,
+    clear: Rgb,
+}
+
+struct Placed {
+    uniforms: Uniforms,
+    offset: usize,
+    count: usize,
+    glyphs: bool,
+}
+
 enum Batch<'a> {
     Rects(&'a [RectInstance]),
     Glyphs(&'a [GlyphInstance]),
 }
 
-/// Copies the batches into one buffer. Returns it with each batch's offset,
-/// instance count and kind (glyphs or rects).
-#[allow(clippy::type_complexity, reason = "a private tuple read right away")]
-fn pack<'a, 'b: 'a>(
-    device: &Device,
-    batches: impl Iterator<Item = &'a Batch<'b>>,
-) -> Option<(Retained<ProtocolObject<dyn MTLBuffer>>, Vec<(usize, usize, bool)>)> {
+fn pack(device: &Device, batches: &[(Uniforms, Batch<'_>)], clear: Rgb) -> Packed {
     // Buffer offsets must be aligned; 256 suits every Apple GPU.
     const ALIGN: usize = 256;
     let mut bytes = Vec::new();
-    let mut layout = Vec::new();
-    for batch in batches {
+    let mut placed = Vec::new();
+    for (uniforms, batch) in batches {
         let offset = bytes.len().next_multiple_of(ALIGN);
         bytes.resize(offset, 0);
         let (raw, count, glyphs) = match batch {
@@ -294,13 +334,13 @@ fn pack<'a, 'b: 'a>(
             Batch::Glyphs(g) => (as_bytes(g), g.len(), true),
         };
         bytes.extend_from_slice(raw);
-        layout.push((offset, count, glyphs));
+        placed.push(Placed { uniforms: *uniforms, offset, count, glyphs });
     }
-    let ptr = NonNull::new(bytes.as_mut_ptr().cast::<c_void>())?;
-    // SAFETY: `bytes` is valid for its length, which is copied.
-    let buffer =
-        unsafe { device.newBufferWithBytes_length_options(ptr, bytes.len(), MTLResourceOptions::StorageModeShared) }?;
-    Some((buffer, layout))
+    let buffer = NonNull::new(bytes.as_mut_ptr().cast::<c_void>()).filter(|_| !bytes.is_empty()).and_then(|ptr| {
+        // SAFETY: `bytes` is valid for its length, which is copied.
+        unsafe { device.newBufferWithBytes_length_options(ptr, bytes.len(), MTLResourceOptions::StorageModeShared) }
+    });
+    Packed { buffer, batches: placed, clear }
 }
 
 fn as_bytes<T: Copy>(items: &[T]) -> &[u8] {
@@ -348,50 +388,77 @@ mod tests {
     use super::*;
     use crate::terminal::{Cell, CellStyle, Grapheme, Row};
 
-    /// Draws one blank pane of `background` under `tint` off screen, and
-    /// reads back its top-left pixel as RGBA.
-    fn pixel(background: Rgb, tint: Tint) -> [u8; 4] {
-        let fonts = Fonts::new(&crate::config::Font::default(), 32.0).expect("fonts");
-        let mut renderer = Renderer::new(fonts).expect("renderer");
-        let (width, height) = (8, 8);
-        // SAFETY: valid format and size.
-        let descriptor = unsafe {
-            MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
-                PIXEL_FORMAT,
-                width,
-                height,
-                false,
-            )
-        };
-        descriptor.setUsage(MTLTextureUsage::RenderTarget);
-        descriptor.setStorageMode(MTLStorageMode::Shared);
-        let target = renderer.device.newTextureWithDescriptor(&descriptor).expect("texture");
+    /// A renderer drawing into a small texture that tests read back.
+    struct Offscreen {
+        renderer: Renderer,
+        target: Retained<Texture>,
+    }
 
+    impl Offscreen {
+        const SIZE: usize = 8;
+
+        fn new() -> Self {
+            let fonts = Fonts::new(&crate::config::Font::default(), 32.0).expect("fonts");
+            let renderer = Renderer::new(fonts).expect("renderer");
+            // SAFETY: valid format and size.
+            let descriptor = unsafe {
+                MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+                    PIXEL_FORMAT,
+                    Self::SIZE,
+                    Self::SIZE,
+                    false,
+                )
+            };
+            descriptor.setUsage(MTLTextureUsage::RenderTarget);
+            descriptor.setStorageMode(MTLStorageMode::Shared);
+            let target = renderer.device.newTextureWithDescriptor(&descriptor).expect("texture");
+            Self { renderer, target }
+        }
+
+        fn prepare(&mut self, panes: &mut [PaneDraw<'_>]) -> Packed {
+            let size = CGSize::new(Self::SIZE as f64, Self::SIZE as f64);
+            self.renderer.prepare(size, panes, &[], &[], Rgb { r: 0, g: 0, b: 0 })
+        }
+
+        /// Draws `packed` and reads back its top-left pixel as RGBA.
+        fn pixel(&self, packed: &Packed) -> [u8; 4] {
+            let commands = self.renderer.encode(&self.target, packed).expect("drawn");
+            commands.commit();
+            commands.waitUntilCompleted();
+            let mut bgra = [0u8; 4];
+            let region =
+                MTLRegion { origin: MTLOrigin { x: 0, y: 0, z: 0 }, size: MTLSize { width: 1, height: 1, depth: 1 } };
+            let bytes = NonNull::new(bgra.as_mut_ptr().cast::<c_void>()).expect("non-null");
+            // SAFETY: one BGRA pixel fits in `bgra`, and the region is inside the texture.
+            unsafe { self.target.getBytes_bytesPerRow_fromRegion_mipmapLevel(bytes, 4 * Self::SIZE, region, 0) };
+            let [b, g, r, a] = bgra;
+            [r, g, b, a]
+        }
+    }
+
+    /// A blank pane of `background`, two cells wide.
+    fn blank_frame(background: Rgb) -> RefCell<Frame> {
         let blank = Cell { text: Grapheme::Empty, fg: background, bg: None, style: CellStyle::default() };
-        let frame = RefCell::new(Frame {
+        RefCell::new(Frame {
             cols: 2,
             rows: vec![Row { cells: vec![blank; 2], dirty: true }],
             background,
             foreground: background,
             cursor: None,
             changed: true,
-        });
-        let overlay = Overlay { focused: false, copy_cursor: None, preedit: "" };
-        let id = "1".parse().expect("pane id");
-        let mut panes = [PaneDraw { id, frame: frame.borrow_mut(), origin: [0.0, 0.0], overlay, tint }];
-        let black = Rgb { r: 0, g: 0, b: 0 };
-        let commands = renderer.draw(&target, &mut panes, &[], &[], black).expect("drawn");
-        commands.commit();
-        commands.waitUntilCompleted();
+        })
+    }
 
-        let mut bgra = [0u8; 4];
-        let region =
-            MTLRegion { origin: MTLOrigin { x: 0, y: 0, z: 0 }, size: MTLSize { width: 1, height: 1, depth: 1 } };
-        let bytes = NonNull::new(bgra.as_mut_ptr().cast::<c_void>()).expect("non-null");
-        // SAFETY: one BGRA pixel fits in `bgra`, and the region is inside the texture.
-        unsafe { target.getBytes_bytesPerRow_fromRegion_mipmapLevel(bytes, 4 * width, region, 0) };
-        let [b, g, r, a] = bgra;
-        [r, g, b, a]
+    fn pane<'a>(frame: &'a RefCell<Frame>, tint: Tint) -> PaneDraw<'a> {
+        let overlay = Overlay { focused: false, copy_cursor: None, preedit: "" };
+        PaneDraw { id: "1".parse().expect("pane id"), frame: frame.borrow_mut(), origin: [0.0, 0.0], overlay, tint }
+    }
+
+    fn pixel(background: Rgb, tint: Tint) -> [u8; 4] {
+        let mut offscreen = Offscreen::new();
+        let frame = blank_frame(background);
+        let packed = offscreen.prepare(&mut [pane(&frame, tint)]);
+        offscreen.pixel(&packed)
     }
 
     #[test]
