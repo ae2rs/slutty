@@ -764,7 +764,9 @@ impl TerminalView {
         let ivars = self.ivars();
         let live = self.live();
         let phase = ticker::phase(live, now);
-        if let Some(current) = ivars.strip.borrow().clone() {
+        // Cloned out first: `show_strip` writes the cell.
+        let current = ivars.strip.borrow().clone();
+        if let Some(current) = current {
             let mut strip = current.clone();
             if live.spinner {
                 strip.frame = phase.spinner;
