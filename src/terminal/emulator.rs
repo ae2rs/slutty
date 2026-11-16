@@ -110,15 +110,6 @@ impl Terminal {
             geometry: Cell::new(geometry),
         });
 
-        let theme = &config.theme;
-        vt.set_scrollback_max_lines(Some(config.terminal.scrollback_lines))?
-            .set_terminfo_name("xterm-256color")?
-            .set_default_fg_color(Some(rgb(theme.foreground)))?
-            .set_default_bg_color(Some(rgb(theme.background)))?
-            .set_default_cursor_color(Some(rgb(theme.cursor)))?
-            .set_default_cursor_style(Some(cursor_style(config.terminal.cursor)))?
-            .set_default_cursor_blink(Some(false))?
-            .set_default_color_palette(Some(xterm_palette(&theme.ansi)))?;
         vt.resize(geometry.cols, geometry.rows, geometry.cell_width, geometry.cell_height)?;
 
         vt.on_pty_write({
@@ -158,22 +149,46 @@ impl Terminal {
         .on_xtversion(|_| Some(concat!("slutty ", env!("CARGO_PKG_VERSION"))))?
         .on_color_scheme(|_| Some(ColorScheme::Dark))?;
 
-        let option_as_alt = match config.terminal.option_as_alt {
-            config::OptionAsAlt::None => OptionAsAlt::False,
-            config::OptionAsAlt::Left => OptionAsAlt::Left,
-            config::OptionAsAlt::Right => OptionAsAlt::Right,
-            config::OptionAsAlt::Both => OptionAsAlt::True,
-        };
-        Ok(Self {
+        let mut terminal = Self {
             vt,
             shared,
             key_encoder: key::Encoder::new()?,
             key_event: key::Event::new()?,
             mouse_encoder: mouse::Encoder::new()?,
             mouse_event: mouse::Event::new()?,
-            option_as_alt,
+            option_as_alt: OptionAsAlt::False,
             buttons_down: 0,
-        })
+        };
+        terminal.configure(config)?;
+        Ok(terminal)
+    }
+
+    /// Applies the settings that live in the terminal: colors, cursor,
+    /// scrollback and the Option key.
+    pub fn configure(&mut self, config: &Config) -> Result<()> {
+        let theme = &config.theme;
+        self.vt
+            .set_scrollback_max_lines(Some(config.terminal.scrollback_lines))?
+            .set_terminfo_name("xterm-256color")?
+            .set_default_fg_color(Some(rgb(theme.foreground)))?
+            .set_default_bg_color(Some(rgb(theme.background)))?
+            .set_default_cursor_color(Some(rgb(theme.cursor)))?
+            .set_default_cursor_style(Some(cursor_style(config.terminal.cursor)))?
+            .set_default_cursor_blink(Some(false))?
+            .set_default_color_palette(Some(xterm_palette(&theme.ansi)))?;
+        self.option_as_alt = match config.terminal.option_as_alt {
+            config::OptionAsAlt::None => OptionAsAlt::False,
+            config::OptionAsAlt::Left => OptionAsAlt::Left,
+            config::OptionAsAlt::Right => OptionAsAlt::Right,
+            config::OptionAsAlt::Both => OptionAsAlt::True,
+        };
+        Ok(())
+    }
+
+    /// Sends bytes to the program as if typed.
+    pub fn send(&mut self, data: &[u8]) {
+        self.shared.replies.borrow_mut().extend_from_slice(data);
+        self.vt.scroll_viewport(ScrollViewport::Bottom);
     }
 
     /// Feeds program output in.

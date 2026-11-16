@@ -114,6 +114,21 @@ impl Mux {
         self.input(|t| t.paste(text));
     }
 
+    /// Sends bytes to the program as if typed.
+    pub fn send(&mut self, data: &[u8]) {
+        self.input(|t| {
+            t.send(data);
+            Ok(())
+        });
+    }
+
+    /// Applies a reloaded config to every terminal.
+    pub fn configure(&mut self, config: &Config) {
+        if let Err(err) = self.pane.terminal.configure(config) {
+            log::warn!("applying the config failed: {err}");
+        }
+    }
+
     pub fn focus(&mut self, focused: bool) {
         self.input(|t| t.focus(focused));
     }
