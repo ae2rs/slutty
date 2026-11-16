@@ -172,3 +172,93 @@ libghostty-vt is a C library. It turns the bytes a program writes into terminal 
 - Environment: `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=slutty`.
 - Resize with `TIOCSWINSZ`. The kernel sends `SIGWINCH`.
 - EOF on the reader means the child is gone. Reap it with `waitpid`, then close the pane.
+
+## Feature inventory
+
+Taken from `~/dotfiles/wezterm/.config/wezterm/`. Milestones refer to the [roadmap](#roadmap).
+
+### Appearance
+
+| Feature | WezTerm setting | Decision | Milestone |
+| --- | --- | --- | --- |
+| Tokyo Night colors | `color_scheme` | Keep. Built-in default theme. | M1 (hardcoded), M2 (config) |
+| JetBrains Mono 16, line height 1 | `font`, `font_size`, `line_height` | Keep. | M1 (hardcoded), M2 |
+| Bold as DemiBold, half as ExtraLight | `font_rules` | Keep as weight settings, not rules. | M2 |
+| Ligatures | WezTerm default | Keep. Needs run shaping. | M7 |
+| Steady bar cursor | `default_cursor_style` | Keep. Programs can still change it. | M1 |
+| No bell sound | `audible_bell` | Keep. Bell does nothing by default. | M1 |
+| No close confirmation | `window_close_confirmation` | Keep. | M1 |
+| No titlebar, resizable | `window_decorations = "RESIZE"` | Keep. Tab bar takes the titlebar area. | M3 |
+| Titlebar colors | `window_frame` | Keep, from the theme. | M3 |
+| Padding 1 cell left and right | `window_padding` | Keep. | M2 |
+| Rapid blink text (SGR 6) | `text_blink_rate_rapid` | Show blinking text steady. A blink needs a timer. | M1 |
+
+### Keys
+
+| Feature | WezTerm binding | Decision | Milestone |
+| --- | --- | --- | --- |
+| Leader `ctrl+s`, no timeout | `leader` | Keep. | M2 |
+| No default bindings | `disable_default_key_bindings` | Keep. Defaults ship as a config file the user owns. | M2 |
+| Kitty keyboard protocol | `enable_kitty_keyboard` | Keep. Always on; programs opt in. | M1 |
+| Copy, paste | `cmd+c`, `cmd+v` | Keep. | M1 |
+| Font size | `cmd/ctrl + - = 0` | Keep. | M2 |
+| Cmd+q asks first | `InputSelector` | Keep as a native alert. | M2 |
+| Cmd/Opt arrows, cmd+backspace remaps | `SendString`, `SendKey` | Keep as `send` actions. | M2 |
+| Fullscreen | `alt+enter` | Keep, native fullscreen. | M6 |
+| Spawn window | `cmd+n` | Keep. | M6 |
+| Reload config | `leader/cmd+R` | Keep, and reload on file change too. | M2 |
+
+### Tabs
+
+| Feature | WezTerm binding | Decision | Milestone |
+| --- | --- | --- | --- |
+| New tab, close tab | `leader t`, `cmd+t`, `cmd+w` | Keep. | M3 |
+| Go to tab 1-9, last | `leader/cmd + 1-9, 0` | Keep. | M3 |
+| Tab bar: index and cwd | tabline plugin | Keep. Cwd from OSC 7. | M3 |
+| Toggle tab bar | `leader/cmd+Z` | Keep. | M3 |
+| Tab bar always shown | `hide_tab_bar_if_only_one_tab = false` | Keep. | M3 |
+| Max tab width 32 | `tab_max_width` | Keep. | M3 |
+| Window title `[i/n] title` | WezTerm default | Keep. AeroSpace finds windows by it. | M3 |
+| RAM, CPU, net, disk widgets | tabline + `popen` every 2 s | Drop for now. Polling breaks the idle rule. Maybe later as an opt-in widget. | M8 |
+| Animated rho star at 60 fps | `animation_fps`, blink easing | Drop the animation. Show a static glyph per state. | M6 |
+
+### Panes
+
+| Feature | WezTerm binding | Decision | Milestone |
+| --- | --- | --- | --- |
+| Split right, split down | `leader v`, `leader -` | Keep. | M4 |
+| Focus pane hjkl | `leader/cmd + hjkl` | Keep. | M4 |
+| Resize pane | `leader shift+hjkl`, resize key table | Keep. | M4 |
+| Close pane, confirm | `leader x` | Keep. | M4 |
+| Zoom pane | `leader/cmd+z` | Keep. | M4 |
+| Rotate panes | `leader/cmd+e` | Keep. | M4 |
+| Pane select by letter | `leader/cmd+p` | Keep. | M4 |
+| Pop pane or tab to a new window | `leader m`, `leader M` | Keep. Simple in-process with our own mux. | M6 |
+
+### Scrollback, selection and search
+
+| Feature | WezTerm setting | Decision | Milestone |
+| --- | --- | --- | --- |
+| 100 000 lines of scrollback | `scrollback_lines` | Keep. | M1 |
+| Wheel scrolls 5 lines | `mouse_bindings` | Keep. | M1 |
+| Mouse selection | WezTerm default | Keep. libghostty has selection. | M5 |
+| Copy mode (vim keys) | `ActivateCopyMode` | Keep. | M5 |
+| Search | `cmd+f` | Keep. libghostty has search. | M5 |
+| Quick select | `leader space` | Keep. | M5 |
+| Open URL | `leader/cmd+o` | Keep. | M5 |
+
+### rho integration
+
+| Feature | WezTerm mechanism | Decision | Milestone |
+| --- | --- | --- | --- |
+| `rho_activity` glyph in the tab | user var, `format-tab-title` | Keep. Built in, no scripting. | M6 |
+| Copy mode over rho's transcript | `rho_scrollback` user var, `ctrl+s` handoff | Keep. Built in. | M6 |
+| Click a notification to focus a pane | `focus_pane` user var | Keep. Raise window and tab, then AeroSpace. | M6 |
+| AeroSpace focus across workspaces | `aerospace list-windows` by title | Keep. rho must learn slutty's bundle id. | M6 |
+
+### Dropped
+
+- **Lua config and callbacks.** TOML covers the use cases above. rho's Lua becomes built-in behaviour.
+- **Character select** (`ctrl+shift+u`). macOS has `ctrl+cmd+space`.
+- **Debug overlay** (`ctrl+shift+l`). Logs replace it.
+- **Command palette** (`cmd+shift+p`). Maybe later; not on the roadmap.
