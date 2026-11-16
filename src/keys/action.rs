@@ -70,6 +70,16 @@ pub enum Action {
     RotatePanes,
     /// Labels the panes; the next key picks one.
     PaneSelect,
+    /// Copies the selection to the clipboard.
+    Copy,
+    CopyMode,
+    /// Opens search, starting from the selected text.
+    Search,
+    /// Labels what is worth copying on screen; a label copies it, and its
+    /// uppercase also pastes it.
+    QuickSelect,
+    /// Labels the URLs on screen; a label opens one.
+    OpenUrl,
 }
 
 fn one() -> u16 {

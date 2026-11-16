@@ -70,6 +70,11 @@ impl Matcher {
         }
     }
 
+    /// No binding is half typed and no table is active.
+    pub fn is_idle(&self) -> bool {
+        self.pending.is_empty() && self.tables.is_empty()
+    }
+
     pub fn reset(&mut self) {
         self.pending.clear();
         self.tables.clear();
