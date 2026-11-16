@@ -139,17 +139,28 @@ libghostty-vt is a C library. It turns the bytes a program writes into terminal 
 
 ### Animations
 
-- Three zones animate: rho's spinner, a blinking cursor, blinking text.
+- Four zones change with time alone: rho's spinner, a blinking cursor, blinking text, and the system stats.
 - One app-wide one-shot `NSTimer`, in common modes, with 10% tolerance.
   - It is armed for the next change of any live zone, and dropped when none is live.
   - So nothing wakes while nothing animates.
 - A zone is live only while its window is on screen: occlusion says visible, and at least one cell lies on a display. AeroSpace parks hidden windows in a corner, which macOS counts as visible.
-- The cursor and text also need the window to be key.
+- The cursor, text and stats also need the window to be key.
 - A tick redraws only what changed:
-  - The spinner has its own transparent layer over the tab bar row. A tick draws just that strip.
+  - The spinner and the stats share a transparent strip layer over the tab bar row. A tick draws just that strip.
   - The cursor and blinking text are batches of their own. Each window keeps its last packed frame, so a tick encodes it again without the hidden batches. No rebuild.
   - If the glyph atlas started over since, the tick draws a full frame instead.
-- Rates: spinner 100 ms a frame; cursor 800 ms on, 800 ms off; text 500 ms on, 500 ms off.
+- Rates: spinner 100 ms a frame; cursor 800 ms on, 800 ms off; text 500 ms on, 500 ms off; stats every 2 s, and 500 ms after the window gains focus.
+
+### System stats
+
+- `tab_bar.status` lists them, in order: `ram`, `cpu`, `net`, `disk`. Empty by default, so the idle rule holds.
+- Read with system calls, not processes:
+  - CPU: busy ticks over total, from `host_statistics`, between two readings.
+  - RAM: app, wired and compressed pages, from `host_statistics64`, as Activity Monitor's Memory Used.
+  - Net: bytes in and out of the `en*` interfaces, from `getifaddrs`, between two readings.
+  - Disk: `statfs` of the data volume, rounded up as `df` does.
+- Each field has a fixed width, so the tabs never shift. The tabs take the cells left of them.
+- Refreshed only while the window is key. Focus reads them at once; CPU and net show `--` until a second reading 500 ms later. An unfocused window keeps the last values, greyed with the bar.
 
 ### Cursor
 
@@ -235,7 +246,7 @@ Taken from `~/dotfiles/wezterm/.config/wezterm/`. Milestones refer to the [roadm
 | Tab bar always shown | `hide_tab_bar_if_only_one_tab = false` | Keep. | M3 |
 | Max tab width 32 | `tab_max_width` | Keep. | M3 |
 | Window title `[i/n] title` | WezTerm default | Keep. AeroSpace finds windows by it. | M3 |
-| RAM, CPU, net, disk widgets | tabline + `popen` every 2 s | Drop for now. Polling breaks the idle rule. Maybe later as an opt-in widget. | M8 |
+| RAM, CPU, net, disk widgets | tabline + `popen` every 2 s | Keep, off by default: `tab_bar.status`. Read with system calls every 2 s, only while the window is key. | M8 |
 | Animated rho star at 60 fps | `animation_fps`, blink easing | Replace with a braille spinner `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` at 10 fps while working. ? question, ✕ stopped, • unread stay static. | M8 |
 
 ### Panes
@@ -293,6 +304,7 @@ Each milestone is one PR. Each must keep the idle rule: no work while nothing ch
 3. Sample with `top -l 4 -s 20 -pid <pid> -stats pid,cpu,idlew,time`.
 4. Pass: CPU 0.0%, idle wake-ups 0, CPU time flat, no new `frame presented` lines.
 5. With an animation on screen, such as rho's spinner, run the same sample. Expect about 10 wake-ups a second, `strip presented` lines, and no `frame presented` lines.
+6. With `tab_bar.status` set, the focused window wakes every 2 s, and each wake logs `strip presented` only.
 
 ### M1: MVP
 
@@ -338,7 +350,7 @@ Each milestone is one PR. Each must keep the idle rule: no work while nothing ch
 
 - Cursor blink with an idle cut-off. Blinking text.
 - rho's spinner. One timer for every animation.
-- Optional status widgets, off by default.
+- System stats on the right of the tab bar, off by default.
 
 WezTerm parity for my use is reached after M7.
 
@@ -392,6 +404,7 @@ wheel_lines = 5
 [tab_bar]
 enabled = true
 max_width = 32
+status = ["ram", "cpu", "net", "disk"] # off when empty, the default
 title = ["rho", "index", "cwd"] # parts, in order
 
 [keys]
