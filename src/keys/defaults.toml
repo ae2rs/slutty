@@ -1,0 +1,26 @@
+# slutty's built-in bindings: the WezTerm setup they replace. A config file
+# adds to them under [keys.bind], removes one with "none", or drops them all
+# with `defaults = false`.
+
+[bind]
+"cmd+q" = "quit"
+"cmd+v" = "paste"
+"ctrl+shift+v" = "paste"
+
+"cmd+-" = "decrease-font-size"
+"ctrl+-" = "decrease-font-size"
+"cmd+=" = "increase-font-size"
+"ctrl+=" = "increase-font-size"
+"cmd+0" = "reset-font-size"
+"ctrl+0" = "reset-font-size"
+
+"leader R" = "reload-config"
+"cmd+R" = "reload-config"
+"alt+enter" = "toggle-fullscreen"
+
+# macOS-style line editing for shells.
+"cmd+left" = { action = "send", text = "\u001bOH" }
+"cmd+right" = { action = "send", text = "\u001bOF" }
+"opt+left" = { action = "send", text = "\u001bb" }
+"opt+right" = { action = "send", text = "\u001bf" }
+"cmd+backspace" = { action = "send-key", key = "ctrl+u" }

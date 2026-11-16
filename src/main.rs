@@ -1,5 +1,6 @@
 mod config;
 mod font;
+mod keys;
 mod mux;
 mod platform;
 mod pty;
