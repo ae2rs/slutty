@@ -17,7 +17,23 @@ pub struct Config {
     pub window: Window,
     pub terminal: Terminal,
     pub mouse: Mouse,
+    pub tab_bar: TabBar,
     pub keys: Keys,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct TabBar {
+    /// Shown when a window opens; a key toggles it.
+    pub enabled: bool,
+    /// The widest a tab grows, in cells.
+    pub max_width: u16,
+}
+
+impl Default for TabBar {
+    fn default() -> Self {
+        Self { enabled: true, max_width: 32 }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
