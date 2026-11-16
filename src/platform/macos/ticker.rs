@@ -10,7 +10,7 @@ use objc2::rc::Retained;
 use objc2_foundation::{NSRunLoop, NSRunLoopCommonModes, NSTimer};
 
 use super::state;
-use crate::animation::{Clock, Phase};
+use crate::animation::{Clock, Live, Phase};
 
 struct Ticker {
     clock: Clock,
@@ -24,9 +24,9 @@ thread_local! {
         RefCell::new(Ticker { clock: Clock::new(Instant::now()), timer: None, due: None });
 }
 
-/// What every zone shows at `now`.
-pub fn phase(now: Instant) -> Phase {
-    TICKER.with(|t| t.borrow().clock.phase(now))
+/// What a window's `live` zones show at `now`.
+pub fn phase(live: Live, now: Instant) -> Phase {
+    TICKER.with(|t| t.borrow().clock.phase(live, now))
 }
 
 /// Arms the timer for the next change of any window's live zones, or stops

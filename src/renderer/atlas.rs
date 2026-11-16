@@ -36,6 +36,8 @@ pub struct Atlas {
     shelf_y: u32,
     shelf_height: u32,
     pending: Vec<Upload>,
+    /// Counts resets, so instances made before one can be told stale.
+    generation: u64,
 }
 
 impl Atlas {
@@ -59,7 +61,11 @@ impl Atlas {
     }
 
     pub fn reset(&mut self) {
-        *self = Self::default();
+        *self = Self { generation: self.generation + 1, ..Self::default() };
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Shelf packing: glyphs fill a row left to right, rows stack down.

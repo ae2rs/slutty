@@ -144,8 +144,9 @@ impl Renderer {
     }
 
     /// Draws the panes into `surface` over `clear` (transparent when `None`),
-    /// pixels from the top-left), then the `chrome` lines. The surface keeps
-    /// the instances.
+    /// then `rects` (device pixels from the top-left), then the `chrome`
+    /// lines, leaving out what `shown` hides. The surface keeps the
+    /// instances, so [`Renderer::redraw`] can draw them again.
     pub fn render(
         &mut self,
         surface: &mut Surface,
@@ -153,18 +154,30 @@ impl Renderer {
         rects: &[RectInstance],
         chrome: &[Line],
         clear: Option<Rgb>,
+        shown: Shown,
     ) {
         surface.packed = Some(self.prepare(surface.layer.drawableSize(), panes, rects, chrome, clear));
-        self.present(surface);
+        self.present(surface, shown);
     }
 
-    fn present(&self, surface: &Surface) {
+    /// Draws what `surface` showed last again with `shown`, without building
+    /// it. Returns false when it has to be rendered instead: nothing was
+    /// drawn yet, or the glyph atlas started over since.
+    pub fn redraw(&self, surface: &Surface, shown: Shown) -> bool {
+        if surface.packed.as_ref().is_none_or(|p| p.atlas != self.atlas.generation()) {
+            return false;
+        }
+        self.present(surface, shown);
+        true
+    }
+
+    fn present(&self, surface: &Surface, shown: Shown) {
         let Some(packed) = &surface.packed else { return };
         let Some(drawable) = surface.layer.nextDrawable() else {
             log::warn!("no drawable; skipping a frame");
             return;
         };
-        match self.encode(&drawable.texture(), packed) {
+        match self.encode(&drawable.texture(), packed, shown) {
             Ok(commands) => {
                 commands.presentDrawable(ProtocolObject::<dyn MTLDrawable>::from_ref(&*drawable));
                 commands.commit();
@@ -199,22 +212,23 @@ impl Renderer {
         for pane in panes.iter() {
             let Some(s) = self.scenes.get(&pane.id) else { continue };
             let uniforms = Uniforms { viewport, origin: pane.origin, tint: pane.tint };
+            let overlay = if pane.overlay.cursor_blinks(pane.frame.cursor) { Zone::Cursor } else { Zone::Always };
             batches.extend([
-                (uniforms, Batch::Rects(&s.rects)),
-                (uniforms, Batch::Glyphs(&s.glyphs)),
-                (uniforms, Batch::Rects(&s.blink_rects)),
-                (uniforms, Batch::Glyphs(&s.blink_glyphs)),
-                (uniforms, Batch::Rects(&s.overlay_rects)),
-                (uniforms, Batch::Glyphs(&s.overlay_glyphs)),
+                (uniforms, Zone::Always, Batch::Rects(&s.rects)),
+                (uniforms, Zone::Always, Batch::Glyphs(&s.glyphs)),
+                (uniforms, Zone::Always, Batch::Rects(&s.blink_rects)),
+                (uniforms, Zone::Always, Batch::Glyphs(&s.blink_glyphs)),
+                (uniforms, overlay, Batch::Rects(&s.overlay_rects)),
+                (uniforms, overlay, Batch::Glyphs(&s.overlay_glyphs)),
             ]);
         }
         let screen = Uniforms { viewport, origin: [0.0, 0.0], tint: Tint::NONE };
         batches.extend([
-            (screen, Batch::Rects(rects)),
-            (screen, Batch::Rects(&self.chrome.rects)),
-            (screen, Batch::Glyphs(&self.chrome.glyphs)),
+            (screen, Zone::Always, Batch::Rects(rects)),
+            (screen, Zone::Always, Batch::Rects(&self.chrome.rects)),
+            (screen, Zone::Always, Batch::Glyphs(&self.chrome.glyphs)),
         ]);
-        pack(&self.device, &batches, clear)
+        pack(&self.device, &batches, clear, self.atlas.generation())
     }
 
     fn build(&mut self, panes: &mut [PaneDraw<'_>], chrome: &[Line]) -> Result<(), Full> {
@@ -241,8 +255,8 @@ impl Renderer {
         }
     }
 
-    /// Draws each batch with its uniforms, in order.
-    fn encode(&self, target: &Texture, packed: &Packed) -> Result<Commands, RenderError> {
+    /// Draws each batch `shown` lets through with its uniforms, in order.
+    fn encode(&self, target: &Texture, packed: &Packed, shown: Shown) -> Result<Commands, RenderError> {
         let pass = MTLRenderPassDescriptor::new();
         // SAFETY: index 0 always exists.
         let color = unsafe { pass.colorAttachments().objectAtIndexedSubscript(0) };
@@ -262,7 +276,7 @@ impl Renderer {
             // offset and count describes instances inside `buffer`.
             unsafe {
                 encoder.setFragmentTexture_atIndex(Some(&self.texture), 0);
-                for batch in packed.batches.iter().filter(|b| b.count > 0) {
+                for batch in packed.batches.iter().filter(|b| b.count > 0 && shown.lets(b.zone)) {
                     let uniforms = NonNull::from(&batch.uniforms).cast();
                     encoder.setVertexBytes_length_atIndex(uniforms, size_of::<Uniforms>(), 0);
                     let pipeline = if batch.glyphs { &self.glyph_pipeline } else { &self.rect_pipeline };
@@ -313,16 +327,44 @@ impl Surface {
     }
 }
 
+/// Which zones that blink are in their visible phase.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shown {
+    pub cursor: bool,
+}
+
+impl Shown {
+    pub const ALL: Self = Self { cursor: true };
+
+    fn lets(self, zone: Zone) -> bool {
+        match zone {
+            Zone::Always => true,
+            Zone::Cursor => self.cursor,
+        }
+    }
+}
+
+/// When a batch is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Zone {
+    Always,
+    /// A blinking cursor, drawn in its visible phase.
+    Cursor,
+}
+
 /// Instances copied into one GPU buffer, and where each batch lies in it.
 struct Packed {
     /// `None` when there is nothing to draw but the clear color.
     buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
     batches: Vec<Placed>,
     clear: Option<Rgb>,
+    /// The glyph atlas generation the glyph instances point into.
+    atlas: u64,
 }
 
 struct Placed {
     uniforms: Uniforms,
+    zone: Zone,
     offset: usize,
     count: usize,
     glyphs: bool,
@@ -333,12 +375,12 @@ enum Batch<'a> {
     Glyphs(&'a [GlyphInstance]),
 }
 
-fn pack(device: &Device, batches: &[(Uniforms, Batch<'_>)], clear: Option<Rgb>) -> Packed {
+fn pack(device: &Device, batches: &[(Uniforms, Zone, Batch<'_>)], clear: Option<Rgb>, atlas: u64) -> Packed {
     // Buffer offsets must be aligned; 256 suits every Apple GPU.
     const ALIGN: usize = 256;
     let mut bytes = Vec::new();
     let mut placed = Vec::new();
-    for (uniforms, batch) in batches {
+    for (uniforms, zone, batch) in batches {
         let offset = bytes.len().next_multiple_of(ALIGN);
         bytes.resize(offset, 0);
         let (raw, count, glyphs) = match batch {
@@ -346,13 +388,13 @@ fn pack(device: &Device, batches: &[(Uniforms, Batch<'_>)], clear: Option<Rgb>) 
             Batch::Glyphs(g) => (as_bytes(g), g.len(), true),
         };
         bytes.extend_from_slice(raw);
-        placed.push(Placed { uniforms: *uniforms, offset, count, glyphs });
+        placed.push(Placed { uniforms: *uniforms, zone: *zone, offset, count, glyphs });
     }
     let buffer = NonNull::new(bytes.as_mut_ptr().cast::<c_void>()).filter(|_| !bytes.is_empty()).and_then(|ptr| {
         // SAFETY: `bytes` is valid for its length, which is copied.
         unsafe { device.newBufferWithBytes_length_options(ptr, bytes.len(), MTLResourceOptions::StorageModeShared) }
     });
-    Packed { buffer, batches: placed, clear }
+    Packed { buffer, batches: placed, clear, atlas }
 }
 
 fn as_bytes<T: Copy>(items: &[T]) -> &[u8] {
@@ -398,7 +440,7 @@ mod tests {
     use objc2_metal::MTLStorageMode;
 
     use super::*;
-    use crate::terminal::{Cell, CellStyle, Grapheme, Row};
+    use crate::terminal::{Cell, CellStyle, Cursor, CursorShape, Grapheme, Row};
 
     /// A renderer drawing into a small texture that tests read back.
     struct Offscreen {
@@ -433,8 +475,8 @@ mod tests {
         }
 
         /// Draws `packed` and reads back its top-left pixel as RGBA.
-        fn pixel(&self, packed: &Packed) -> [u8; 4] {
-            let commands = self.renderer.encode(&self.target, packed).expect("drawn");
+        fn pixel(&self, packed: &Packed, shown: Shown) -> [u8; 4] {
+            let commands = self.renderer.encode(&self.target, packed, shown).expect("drawn");
             commands.commit();
             commands.waitUntilCompleted();
             let mut bgra = [0u8; 4];
@@ -470,7 +512,21 @@ mod tests {
         let mut offscreen = Offscreen::new();
         let frame = blank_frame(background);
         let packed = offscreen.prepare(&mut [pane(&frame, tint)]);
-        offscreen.pixel(&packed)
+        offscreen.pixel(&packed, Shown::ALL)
+    }
+
+    #[test]
+    fn a_blinking_cursor_is_left_out_in_its_hidden_phase() {
+        let mut offscreen = Offscreen::new();
+        let (black, red) = (Rgb { r: 0, g: 0, b: 0 }, Rgb { r: 255, g: 0, b: 0 });
+        let frame = blank_frame(black);
+        let cursor = Cursor { x: 0, y: 0, shape: CursorShape::Block, wide: false, color: Some(red), blinking: true };
+        frame.borrow_mut().cursor = Some(cursor);
+        let mut pane = pane(&frame, Tint::NONE);
+        pane.overlay.focused = true;
+        let packed = offscreen.prepare(&mut [pane]);
+        assert_eq!(offscreen.pixel(&packed, Shown::ALL), [255, 0, 0, 255]);
+        assert_eq!(offscreen.pixel(&packed, Shown { cursor: false }), [0, 0, 0, 255]);
     }
 
     #[test]

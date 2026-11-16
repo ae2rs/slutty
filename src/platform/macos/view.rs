@@ -38,7 +38,7 @@ use crate::animation::Live;
 use crate::config::{self, Config, OptionAsAlt};
 use crate::keys::Outcome;
 use crate::mux::{Axis, ModeKey, PaneId, Rect, Visible, WindowId};
-use crate::renderer::{Line, Overlay, PaneDraw, RectInstance, Renderer, Surface, Tint};
+use crate::renderer::{Line, Overlay, PaneDraw, RectInstance, Renderer, Shown, Surface, Tint};
 use crate::terminal::{CellStyle, Highlight, KeyInput, MouseInput, SearchStatus};
 
 pub struct Ivars {
@@ -54,6 +54,13 @@ pub struct Ivars {
     /// The zones last reported live, so the timer is armed again only when
     /// they change.
     live: Cell<Live>,
+    /// The last key press or focus, which a blinking cursor's phase starts
+    /// from.
+    input_at: Cell<Instant>,
+    /// The active pane's cursor blinks, as last drawn.
+    cursor_blinks: Cell<bool>,
+    /// The blinking zones the window's surface shows.
+    shown: Cell<Shown>,
     link: OnceCell<Retained<CADisplayLink>>,
     layout: Cell<Layout>,
     /// Each tab's cells in the tab bar, for clicks.
@@ -145,6 +152,7 @@ define_class!(
 
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
+            self.restart_blink();
             if !self.bind_key(event) {
                 self.handle_key_down(event);
             }
@@ -393,6 +401,9 @@ impl TerminalView {
             spinner: RefCell::new(None),
             on_screen: Cell::new(false),
             live: Cell::new(Live::default()),
+            input_at: Cell::new(Instant::now()),
+            cursor_blinks: Cell::new(false),
+            shown: Cell::new(Shown::ALL),
             link: OnceCell::new(),
             layout: Cell::new(layout),
             tab_cells: RefCell::new(Vec::new()),
@@ -552,7 +563,7 @@ impl TerminalView {
                 );
                 *ivars.tab_cells.borrow_mut() = bar.tabs;
                 if !bar.spinners.is_empty() && settings.error.is_none() {
-                    let frame = ticker::phase(Instant::now()).spinner;
+                    let frame = ticker::phase(Live::default(), Instant::now()).spinner;
                     spinner = Some(SpinnerFrame { spinners: bar.spinners, background: bar.line.background, frame });
                 }
                 chrome.push(bar.line);
@@ -644,6 +655,7 @@ impl TerminalView {
                 rects.push(RectInstance::new(pos, [width, stroke], [r, g, b, 255]));
             }
             let mut cursor = None;
+            let mut cursor_blinks = false;
             let mut panes: Vec<PaneDraw<'_>> = visible
                 .into_iter()
                 .map(|(id, rect, frame)| {
@@ -655,12 +667,16 @@ impl TerminalView {
                     let preedit = if is_active { marked.as_str() } else { "" };
                     let copy_cursor = modes.iter().find(|(p, _)| *p == id).and_then(|(_, modes)| modes.copy_cursor);
                     let overlay = Overlay { focused: focused && is_active, copy_cursor, preedit };
+                    cursor_blinks |= is_active && overlay.cursor_blinks(frame.cursor);
                     let tint = if split && !is_active { INACTIVE } else { Tint::NONE };
                     PaneDraw { id, frame, origin, overlay, tint }
                 })
                 .collect();
+            ivars.cursor_blinks.set(cursor_blinks);
+            let shown = Shown { cursor: ticker::phase(self.live(), Instant::now()).cursor };
+            ivars.shown.set(shown);
             let surface = &mut ivars.surface.borrow_mut();
-            renderer.render(surface, &mut panes, &rects, &chrome, Some(rgb(theme.background)));
+            renderer.render(surface, &mut panes, &rects, &chrome, Some(rgb(theme.background)), shown);
             self.show_spinner(renderer, spinner);
             Some((cursor, m))
         })
@@ -692,7 +708,7 @@ impl TerminalView {
         CATransaction::commit();
         if let Some(spinner) = &spinner {
             let lines = spinner.lines(renderer.metrics().cell_width as f32);
-            renderer.render(surface, &mut [], &[], &lines, None);
+            renderer.render(surface, &mut [], &[], &lines, None, Shown::ALL);
             log::trace!("spinner presented");
         }
         *ivars.spinner.borrow_mut() = spinner;
@@ -701,7 +717,11 @@ impl TerminalView {
     /// The zones animating in this window now.
     pub fn live(&self) -> Live {
         let ivars = self.ivars();
-        Live { spinner: ivars.on_screen.get() && ivars.spinner.borrow().is_some() }
+        let on_screen = ivars.on_screen.get();
+        Live {
+            spinner: on_screen && ivars.spinner.borrow().is_some(),
+            cursor: (on_screen && ivars.focused.get() && ivars.cursor_blinks.get()).then(|| ivars.input_at.get()),
+        }
     }
 
     /// Arms the timer again if the live zones changed.
@@ -715,15 +735,36 @@ impl TerminalView {
     /// Brings the live zones to what they show at `now`, drawing only those
     /// that changed.
     pub fn animate(&self, now: Instant) {
-        let phase = ticker::phase(now);
-        let spinner = self.ivars().spinner.borrow().clone();
+        let ivars = self.ivars();
+        let live = self.live();
+        let phase = ticker::phase(live, now);
+        let spinner = ivars.spinner.borrow().clone();
         if let Some(spinner) = spinner
-            && self.live().spinner
+            && live.spinner
             && spinner.frame != phase.spinner
         {
             let spinner = SpinnerFrame { frame: phase.spinner, ..spinner };
             with_app(|app| self.show_spinner(&mut app.renderer, Some(spinner)));
         }
+        let shown = Shown { cursor: phase.cursor };
+        if shown != ivars.shown.get() {
+            let redrawn = with_app(|app| app.renderer.redraw(&ivars.surface.borrow(), shown));
+            if redrawn == Some(true) {
+                ivars.shown.set(shown);
+                log::trace!("blink presented");
+            } else {
+                ivars.overlay_dirty.set(true);
+                self.draw();
+            }
+        }
+    }
+
+    /// Shows a blinking cursor and starts its phase and cut-off over.
+    fn restart_blink(&self) {
+        let now = Instant::now();
+        self.ivars().input_at.set(now);
+        self.animate(now);
+        self.note_live();
     }
 
     /// Reads whether the window shows on a screen: not covered, minimized or
@@ -754,6 +795,9 @@ impl TerminalView {
 
     fn set_focused(&self, focused: bool) {
         self.ivars().focused.set(focused);
+        if focused {
+            self.ivars().input_at.set(Instant::now());
+        }
         let window = self.ivars().window;
         with_app(|app| app.mux.focus(window, focused));
         self.ivars().overlay_dirty.set(true);

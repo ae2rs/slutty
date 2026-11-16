@@ -10,11 +10,20 @@ pub const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦'
 /// How long the spinner shows each frame.
 const SPINNER_FRAME: Duration = Duration::from_millis(100);
 
+/// How long a blinking cursor stays on, then off.
+const CURSOR_BLINK: Duration = Duration::from_millis(800);
+
+/// How long after input a cursor keeps blinking before it holds still.
+const CURSOR_CUTOFF: Duration = Duration::from_secs(5);
+
 /// What animates in one window now: its live zones.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Live {
     /// rho's spinner shows in the tab bar of a window on screen.
     pub spinner: bool,
+    /// The cursor of a key window on screen blinks, its phase starting at
+    /// this input.
+    pub cursor: Option<Instant>,
 }
 
 /// What the zones show at one moment.
@@ -22,6 +31,8 @@ pub struct Live {
 pub struct Phase {
     /// The spinner's frame, an index into [`SPINNER`].
     pub spinner: usize,
+    /// A blinking cursor is in its visible half; a steady one always is.
+    pub cursor: bool,
 }
 
 /// Time for every animation, counted from one epoch so that zones in
@@ -36,25 +47,50 @@ impl Clock {
         Self { epoch }
     }
 
-    pub fn phase(&self, now: Instant) -> Phase {
-        Phase { spinner: (self.steps(now, SPINNER_FRAME) % SPINNER.len() as u128) as usize }
+    pub fn phase(&self, live: Live, now: Instant) -> Phase {
+        Phase {
+            spinner: (steps(self.epoch, now, SPINNER_FRAME) % SPINNER.len() as u128) as usize,
+            cursor: live.cursor.is_none_or(|since| cursor_on(since, now)),
+        }
     }
 
-    /// When the next live zone changes, or `None` when none is live.
+    /// When the next live zone changes, or `None` when none will.
     pub fn next_change(&self, live: Live, now: Instant) -> Option<Instant> {
-        live.spinner.then(|| self.next_step(now, SPINNER_FRAME))
+        let spinner = live.spinner.then(|| next_step(self.epoch, now, SPINNER_FRAME));
+        let cursor = live.cursor.and_then(|since| next_cursor_change(since, now));
+        spinner.into_iter().chain(cursor).min()
     }
+}
 
-    /// Whole periods of `period` since the epoch.
-    fn steps(&self, now: Instant, period: Duration) -> u128 {
-        now.saturating_duration_since(self.epoch).as_nanos() / period.as_nanos()
-    }
+/// Whether a cursor blinking since `since` shows at `now`: on first, then
+/// off, and on for good once the cut-off passes.
+fn cursor_on(since: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(since) >= CURSOR_CUTOFF || steps(since, now, CURSOR_BLINK).is_multiple_of(2)
+}
 
-    /// The start of the next period of `period` after `now`.
-    fn next_step(&self, now: Instant, period: Duration) -> Instant {
-        let steps = u32::try_from(self.steps(now, period) + 1).unwrap_or(u32::MAX);
-        self.epoch + period * steps
+fn next_cursor_change(since: Instant, now: Instant) -> Option<Instant> {
+    let end = since + CURSOR_CUTOFF;
+    if now >= end {
+        return None;
     }
+    let next = next_step(since, now, CURSOR_BLINK);
+    if next < end {
+        Some(next)
+    } else {
+        // The last half before the cut-off: only an off cursor still changes.
+        (!cursor_on(since, now)).then_some(end)
+    }
+}
+
+/// Whole periods of `period` from `epoch` to `now`.
+fn steps(epoch: Instant, now: Instant, period: Duration) -> u128 {
+    now.saturating_duration_since(epoch).as_nanos() / period.as_nanos()
+}
+
+/// The start of the next period of `period` from `epoch` after `now`.
+fn next_step(epoch: Instant, now: Instant, period: Duration) -> Instant {
+    let steps = u32::try_from(steps(epoch, now, period) + 1).unwrap_or(u32::MAX);
+    epoch + period * steps
 }
 
 #[cfg(test)]
@@ -77,10 +113,9 @@ mod tests {
     fn the_spinner_turns_every_hundred_milliseconds_and_wraps() {
         let epoch = Instant::now();
         let clock = Clock::new(epoch);
-        assert_eq!(clock.phase(epoch).spinner, 0);
-        assert_eq!(clock.phase(epoch + 99 * MS).spinner, 0);
-        assert_eq!(clock.phase(epoch + 100 * MS).spinner, 1);
-        assert_eq!(clock.phase(epoch + 1_050 * MS).spinner, 0, "ten frames wrap");
+        let at = |ms: u32| clock.phase(Live::default(), epoch + ms * MS).spinner;
+        assert_eq!((at(0), at(99), at(100)), (0, 0, 1));
+        assert_eq!(at(1_050), 0, "ten frames wrap");
     }
 
     #[test]
@@ -93,8 +128,34 @@ mod tests {
     fn a_live_spinner_wakes_on_its_next_frame() {
         let epoch = Instant::now();
         let clock = Clock::new(epoch);
-        let live = Live { spinner: true };
+        let live = Live { spinner: true, ..Live::default() };
         assert_eq!(clock.next_change(live, epoch + 130 * MS), Some(epoch + 200 * MS));
         assert_eq!(clock.next_change(live, epoch + 200 * MS), Some(epoch + 300 * MS));
+    }
+
+    #[test]
+    fn the_cursor_blinks_from_the_last_input_then_holds_on() {
+        let epoch = Instant::now();
+        let clock = Clock::new(epoch);
+        let input = epoch + 333 * MS;
+        let live = Live { cursor: Some(input), ..Live::default() };
+        let on = |ms: u32| clock.phase(live, input + ms * MS).cursor;
+        assert!(on(0) && on(799) && !on(800) && !on(1_599) && on(1_600));
+        assert!(!on(4_000) && on(4_800) && on(5_200) && on(60_000), "on for good after the cut-off");
+        assert!(clock.phase(Live::default(), input).cursor, "a steady cursor shows");
+
+        let next = |ms: u32| clock.next_change(live, input + ms * MS);
+        assert_eq!(next(10), Some(input + 800 * MS), "in phase with the input, not the epoch");
+        assert_eq!(next(4_100), Some(input + 4_800 * MS));
+        assert_eq!(next(4_800), None, "no wake-ups once it holds");
+    }
+
+    #[test]
+    fn the_timer_wakes_for_the_soonest_zone() {
+        let epoch = Instant::now();
+        let clock = Clock::new(epoch);
+        let live = Live { spinner: true, cursor: Some(epoch + 50 * MS) };
+        assert_eq!(clock.next_change(live, epoch + 820 * MS), Some(epoch + 850 * MS));
+        assert_eq!(clock.next_change(live, epoch + 860 * MS), Some(epoch + 900 * MS));
     }
 }

@@ -42,6 +42,14 @@ pub struct Overlay<'a> {
     pub preedit: &'a str,
 }
 
+impl Overlay<'_> {
+    /// The terminal's `cursor` shows and blinks: in a focused pane, outside
+    /// copy mode and composition.
+    pub fn cursor_blinks(&self, cursor: Option<Cursor>) -> bool {
+        self.focused && self.copy_cursor.is_none() && self.preedit.is_empty() && cursor.is_some_and(|c| c.blinking)
+    }
+}
+
 /// A line of text outside the grid, such as a banner or the tab bar, in
 /// device pixels from the drawable's top-left corner.
 #[derive(Clone, Debug)]
