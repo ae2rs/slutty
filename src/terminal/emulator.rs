@@ -446,6 +446,43 @@ mod tests {
     }
 
     #[test]
+    fn scrolls_into_history_and_back_on_key_press() {
+        let mut t = terminal();
+        for i in 0..10 {
+            t.write(format!("line{i}\r\n").as_bytes());
+        }
+        assert_eq!(row_text(&mut t, 0), "line8");
+        t.scroll(-5, Mods::empty(), 0.0, 0.0).expect("scroll");
+        assert_eq!(row_text(&mut t, 0), "line3");
+        let input = KeyInput {
+            key: Key::A,
+            action: key::Action::Press,
+            mods: Mods::empty(),
+            consumed: Mods::empty(),
+            text: Some("a"),
+            unshifted: Some('a'),
+        };
+        t.key(&input).expect("key");
+        assert_eq!(row_text(&mut t, 0), "line8");
+        assert_eq!(t.take_replies(), b"a");
+    }
+
+    fn press(t: &mut Terminal, key: Key, mods: Mods, text: &str, unshifted: char) -> Vec<u8> {
+        let consumed = if mods.contains(Mods::ALT_SIDE) { mods & (Mods::ALT | Mods::ALT_SIDE) } else { Mods::empty() };
+        let input =
+            KeyInput { key, action: key::Action::Press, mods, consumed, text: Some(text), unshifted: Some(unshifted) };
+        t.key(&input).expect("key");
+        t.take_replies()
+    }
+
+    #[test]
+    fn left_option_is_alt_and_right_option_composes() {
+        let mut t = terminal();
+        assert_eq!(press(&mut t, Key::B, Mods::ALT, "b", 'b'), b"\x1bb");
+        assert_eq!(press(&mut t, Key::D, Mods::ALT | Mods::ALT_SIDE, "∂", 'd'), "∂".as_bytes());
+    }
+
+    #[test]
     fn replies_to_device_attribute_queries() {
         let t = &mut terminal();
         t.write(b"\x1b[c");
