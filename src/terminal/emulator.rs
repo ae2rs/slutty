@@ -21,6 +21,7 @@ use libghostty_vt::{Error, RenderState, focus, paste};
 use super::copy_mode::CopyMode;
 use super::frame::{Frame, Iterators, SelectionColors};
 use super::select::{Searching, Selector};
+use super::user_vars;
 use crate::config::{self, Config};
 
 /// A program that holds the screen longer than this (synchronized output)
@@ -109,6 +110,7 @@ pub struct Terminal {
     pub(super) selector: Selector,
     pub(super) copy: Option<CopyMode>,
     pub(super) searching: Option<Searching>,
+    user_vars: user_vars::Scanner,
     key_encoder: key::Encoder<'static>,
     key_event: key::Event<'static>,
     mouse_encoder: mouse::Encoder<'static>,
@@ -199,6 +201,7 @@ impl Terminal {
             selector: Selector::new()?,
             copy: None,
             searching: None,
+            user_vars: user_vars::Scanner::default(),
             key_encoder: key::Encoder::new()?,
             key_event: key::Event::new()?,
             mouse_encoder: mouse::Encoder::new()?,
@@ -240,9 +243,11 @@ impl Terminal {
         self.vt.scroll_viewport(ScrollViewport::Bottom);
     }
 
-    /// Feeds program output in.
-    pub fn write(&mut self, data: &[u8]) {
+    /// Feeds program output in. Returns the user variables it set.
+    pub fn write(&mut self, data: &[u8]) -> Vec<(String, String)> {
+        let vars = self.user_vars.feed(data);
         self.vt.vt_write(data);
+        vars
     }
 
     /// Text the program last put on the clipboard, once.
