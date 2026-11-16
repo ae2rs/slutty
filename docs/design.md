@@ -137,10 +137,25 @@ libghostty-vt is a C library. It turns the bytes a program writes into terminal 
 - Key: face, glyph id, scale. Rasterised once with CoreText.
 - Rebuilt when the backing scale or font size changes.
 
+### Animations
+
+- Three zones animate: rho's spinner, a blinking cursor, blinking text.
+- One app-wide one-shot `NSTimer`, in common modes, with 10% tolerance.
+  - It is armed for the next change of any live zone, and dropped when none is live.
+  - So nothing wakes while nothing animates.
+- A zone is live only while its window is on screen: occlusion says visible, and at least one cell lies on a display. AeroSpace parks hidden windows in a corner, which macOS counts as visible.
+- The cursor and text also need the window to be key.
+- A tick redraws only what changed:
+  - The spinner has its own transparent layer over the tab bar row. A tick draws just that strip.
+  - The cursor and blinking text are batches of their own. Each window keeps its last packed frame, so a tick encodes it again without the hidden batches. No rebuild.
+  - If the glyph atlas started over since, the tick draws a full frame instead.
+- Rates: spinner 100 ms a frame; cursor 800 ms on, 800 ms off; text 500 ms on, 500 ms off.
+
 ### Cursor
 
 - Shapes: block, bar, underline, hollow block when unfocused.
-- No blinking in the MVP: a blink needs a timer. Later, blink only while focused and asked for, and stop after a few seconds of no input.
+- Blinks when the program asks (DECSCUSR, mode 12), or by default with `terminal.cursor_blink`.
+- Blinks only while the window is key. Each key press shows it and restarts the phase. 5 s after the last input it holds on and the timer stops.
 
 ## Input
 
@@ -189,9 +204,10 @@ Taken from `~/dotfiles/wezterm/.config/wezterm/`. Milestones refer to the [roadm
 | No bell sound | `audible_bell` | Keep. Bell does nothing by default. | M1 |
 | No close confirmation | `window_close_confirmation` | Keep. | M1 |
 | No titlebar, resizable | `window_decorations = "RESIZE"` | Keep. Tab bar takes the titlebar area. | M3 |
-| Titlebar colors | `window_frame` | Keep, from the theme. | M3 |
+| Titlebar colors | `window_frame` | Keep, from the theme. Greyed while the window is not key (`inactive_titlebar_bg`, `inactive_titlebar_fg`). | M3 |
+| Hovered tab turns aqua | Tokyo Night `tab_bar` | Keep. The active tab stays yellow. | M8 |
 | Padding 1 cell left and right | `window_padding` | Keep. | M2 |
-| Rapid blink text (SGR 6) | `text_blink_rate_rapid` | Show blinking text steady. A blink needs a timer. | M1 |
+| Blinking text (SGR 5 and 6) | `text_blink_rate`, `text_blink_rate_rapid` | Keep, one rate: 500 ms. libghostty has one flag for both. Only while the window is key. | M8 |
 
 ### Keys
 
@@ -220,7 +236,7 @@ Taken from `~/dotfiles/wezterm/.config/wezterm/`. Milestones refer to the [roadm
 | Max tab width 32 | `tab_max_width` | Keep. | M3 |
 | Window title `[i/n] title` | WezTerm default | Keep. AeroSpace finds windows by it. | M3 |
 | RAM, CPU, net, disk widgets | tabline + `popen` every 2 s | Drop for now. Polling breaks the idle rule. Maybe later as an opt-in widget. | M8 |
-| Animated rho star at 60 fps | `animation_fps`, blink easing | Drop the animation. Show a static glyph per state: ✦ working, ? question, ✕ stopped, • unread. | M6 |
+| Animated rho star at 60 fps | `animation_fps`, blink easing | Replace with a braille spinner `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` at 10 fps while working. ? question, ✕ stopped, • unread stay static. | M8 |
 
 ### Panes
 
@@ -246,7 +262,7 @@ Taken from `~/dotfiles/wezterm/.config/wezterm/`. Milestones refer to the [roadm
 | Copy on release | WezTerm default | Keep. Releasing a selection copies it to the clipboard. | M5 |
 | Open links on click | WezTerm default | Keep. OSC 8 links and plain URLs. | M5 |
 | Copy mode (vim keys) | `ActivateCopyMode` | Keep. | M5 |
-| Search | `cmd+f` | Keep. libghostty has search. | M5 |
+| Search | `cmd+f` | Keep. libghostty has text search. `ctrl+r` switches to a regex, case-sensitive, matched per screen row: a match never spans a soft wrap. | M5, M8 (regex) |
 | Quick select | `leader space` | Keep. | M5 |
 | Open URL | `leader/cmd+o` | Keep. | M5 |
 
@@ -276,6 +292,7 @@ Each milestone is one PR. Each must keep the idle rule: no work while nothing ch
 2. Focus the window and leave it for 60 s at a static prompt.
 3. Sample with `top -l 4 -s 20 -pid <pid> -stats pid,cpu,idlew,time`.
 4. Pass: CPU 0.0%, idle wake-ups 0, CPU time flat, no new `frame presented` lines.
+5. With an animation on screen, such as rho's spinner, run the same sample. Expect about 10 wake-ups a second, `spinner presented` lines, and no `frame presented` lines.
 
 ### M1: MVP
 
@@ -320,19 +337,14 @@ Each milestone is one PR. Each must keep the idle rule: no work while nothing ch
 ### M8: Polish
 
 - Cursor blink with an idle cut-off. Blinking text.
+- rho's spinner. One timer for every animation.
 - Optional status widgets, off by default.
 
 WezTerm parity for my use is reached after M7.
 
 ### Parity check
 
-Every Keep row above is built, and the bindings match `keys.lua` and `rho.lua`. Known differences:
-
-- Inactive panes are darkened to 80% brightness but not desaturated (WezTerm: saturation 0.9).
-- The tab bar keeps the active colors when the window loses focus; WezTerm's `window_frame` greys it.
-- A hovered tab does not turn aqua.
-- Search is plain text, with no regex mode.
-- The working star is steady, not pulsing (decided above).
+Every Keep row above is built, and the bindings match `keys.lua` and `rho.lua`. No known differences remain.
 
 Each milestone's GUI checks still run in a batch before its merge.
 
