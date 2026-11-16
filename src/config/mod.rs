@@ -6,5 +6,5 @@ mod settings;
 mod theme;
 
 pub use load::{load, path};
-pub use settings::{Config, CursorShape, Font, FontWeight, Length, OptionAsAlt, Padding};
-pub use theme::{Rgb, Theme};
+pub use settings::{Config, CursorShape, Font, FontWeight, OptionAsAlt, Padding};
+pub use theme::Rgb;

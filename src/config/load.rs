@@ -15,22 +15,30 @@ pub fn path() -> Option<PathBuf> {
     Some(base.join("slutty").join("slutty.toml"))
 }
 
+/// The config in `path`, or why it cannot be used, in one line that starts
+/// with the file's name.
 pub fn load(path: &Path) -> Result<Config, String> {
+    let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
     match std::fs::read_to_string(path) {
-        Ok(text) => parse(&text).map_err(|err| format!("{}: {err}", path.display())),
+        Ok(text) => parse(&text).map_err(|err| format!("{name}: {err}")),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Config::default()),
-        Err(err) => Err(format!("{}: {err}", path.display())),
+        Err(err) => Err(format!("{name}: {err}")),
     }
 }
 
+/// Parses a config file. The error is one line, such as
+/// "line 3: unknown field `famliy`, expected ...".
 pub fn parse(text: &str) -> Result<Config, String> {
-    toml::from_str(text).map_err(|err| err.to_string().trim_end().to_owned())
+    toml::from_str(text).map_err(|err| match err.span() {
+        Some(span) => format!("line {}: {}", text[..span.start].matches('\n').count() + 1, err.message().trim_end()),
+        None => err.message().trim_end().to_owned(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{FontWeight, Length};
+    use crate::config::settings::{FontWeight, Length};
 
     #[test]
     fn an_empty_file_is_the_defaults() {
