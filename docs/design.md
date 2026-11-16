@@ -279,7 +279,7 @@ Each milestone is one PR. Each must keep the idle rule: no work while nothing ch
 - One window, one pane, the login shell.
 - Metal renderer with damage-driven frames.
 - Keys through libghostty, IME, Option as Alt on the left.
-- Scrollback with the wheel. Copy and paste.
+- Scrollback with the wheel. Paste; copy comes with selection in M5.
 - Hardcoded font and theme.
 
 ### M2: Config and keybindings
