@@ -38,7 +38,7 @@ pub struct Spinner {
 
 /// Lays out `tabs` across `cols` cells. Each reads `⠋ 2 dir `: rho's mark,
 /// the index, then the active pane's directory. Without `focused`, the bar
-/// greys out as WezTerm's `window_frame` does; rho's marks keep their colors.
+/// greys out as WezTerm's `window_frame` does; rho's static marks keep their colors.
 /// An inactive tab under the pointer (`hover`) turns aqua.
 pub fn build(
     tabs: &[TabView<'_>],
@@ -56,12 +56,19 @@ pub fn build(
     let mut spinners = Vec::new();
     for (i, tab) in tabs.iter().enumerate() {
         let inset = if i == 0 { " ".repeat(EDGE) } else { String::new() };
-        // A cell for a mark, so titles never shift when one appears. Only the
-        // active tab's working spinner is colored; the others stay grey.
-        let (blue, muted) = (theme.ansi[4], theme.ansi[8]);
+        let fg = match (focused, tab.active) {
+            (false, _) => theme.inactive_titlebar_fg,
+            (true, true) => theme.ansi[3],
+            (true, false) if hover == Some(i) => theme.ansi[6],
+            (true, false) => theme.foreground,
+        };
+        // A cell for a mark, so titles never shift when one appears. The
+        // active tab's working spinner takes the title's color; the others
+        // stay grey.
+        let blue = theme.ansi[4];
         let working = tab.info.rho == Some(RhoActivity::Working);
         let (mark, mark_color) = match tab.info.rho {
-            Some(RhoActivity::Working) => (' ', if tab.active { blue } else { muted }),
+            Some(RhoActivity::Working) => (' ', if tab.active { fg } else { theme.ansi[8] }),
             Some(RhoActivity::Question) => ('?', blue),
             Some(RhoActivity::Stopped) => ('✕', theme.ansi[1]),
             Some(RhoActivity::Unread) => ('•', theme.ansi[2]),
@@ -74,12 +81,6 @@ pub fn build(
         if start + text.chars().count() > cols {
             break;
         }
-        let fg = match (focused, tab.active) {
-            (false, _) => theme.inactive_titlebar_fg,
-            (true, true) => theme.ansi[3],
-            (true, false) if hover == Some(i) => theme.ansi[6],
-            (true, false) => theme.foreground,
-        };
         line.push_str(&text, rgb(fg), CellStyle::default());
         let mark_cell = start + inset.len();
         if let Some(cell) = line.cells.get_mut(mark_cell) {
@@ -200,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn working_tabs_leave_their_mark_to_a_spinner_blue_only_when_active() {
+    fn working_tabs_leave_their_mark_to_a_spinner_in_the_title_color_only_when_active() {
         let rho = PaneInfo { cwd: Some("/a".into()), rho: Some(RhoActivity::Working), ..PaneInfo::default() };
         let tabs = [TabView { active: true, info: &rho }, TabView { active: false, info: &rho }];
         let theme = Theme::default();
@@ -208,7 +209,7 @@ mod tests {
         assert_eq!(text(&bar), "    1 a    2 a  ");
         let rgb = |[r, g, b]: config::Rgb| Rgb { r, g, b };
         let spinner = |cell, color| Spinner { cell, color: rgb(color) };
-        assert_eq!(bar.spinners, vec![spinner(2, theme.ansi[4]), spinner(9, theme.ansi[8])]);
+        assert_eq!(bar.spinners, vec![spinner(2, theme.ansi[3]), spinner(9, theme.ansi[8])]);
     }
 
     #[test]
