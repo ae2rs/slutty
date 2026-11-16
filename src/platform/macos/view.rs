@@ -17,12 +17,13 @@ use objc2_app_kit::{
     NSEvent, NSEventModifierFlags, NSResponder, NSTextInputClient, NSTrackingArea, NSTrackingAreaOptions, NSView,
     NSViewLayerContentsRedrawPolicy, NSWindowDelegate,
 };
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound, NSNotification, NSObject, NSPoint, NSRange,
     NSRangePointer, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSUInteger,
 };
 use objc2_metal::MTLDevice;
-use objc2_quartz_core::{CADisplayLink, CALayer};
+use objc2_quartz_core::{CADisplayLink, CALayer, CATransaction};
 
 use super::actions;
 use super::keys;
@@ -30,16 +31,21 @@ use super::layout::Layout;
 use super::pointer::Hover;
 use super::quick_select::QuickSelect;
 use super::state::{self, App, with_app};
-use super::tab_bar;
+use super::tab_bar::{self, SpinnerFrame};
 use crate::config::{self, Config, OptionAsAlt};
 use crate::keys::Outcome;
 use crate::mux::{Axis, ModeKey, PaneId, Rect, Visible, WindowId};
-use crate::renderer::{Line, Overlay, PaneDraw, RectInstance, Surface, Tint};
+use crate::renderer::{Line, Overlay, PaneDraw, RectInstance, Renderer, Surface, Tint};
 use crate::terminal::{CellStyle, Highlight, KeyInput, MouseInput, SearchStatus};
 
 pub struct Ivars {
     window: WindowId,
     surface: RefCell<Surface>,
+    /// Over the tab bar row: rho's spinners, so they animate without drawing
+    /// the window.
+    spinner_surface: RefCell<Surface>,
+    /// What the spinner surface shows; `None` while it is hidden.
+    spinner: RefCell<Option<SpinnerFrame>>,
     link: OnceCell<Retained<CADisplayLink>>,
     layout: Cell<Layout>,
     /// Each tab's cells in the tab bar, for clicks.
@@ -106,6 +112,7 @@ define_class!(
             let Some(window) = self.window() else { return };
             let scale = window.backingScaleFactor();
             self.ivars().surface.borrow().layer().setContentsScale(scale);
+            self.ivars().spinner_surface.borrow().layer().setContentsScale(scale);
             let changed = with_app(|app| {
                 if app.scale == scale {
                     return false;
@@ -352,9 +359,15 @@ impl TerminalView {
         device: &ProtocolObject<dyn MTLDevice>,
         scale: f64,
     ) -> Retained<Self> {
+        let surface = Surface::new(device, scale);
+        let spinner_surface = Surface::transparent(device, scale);
+        spinner_surface.layer().setHidden(true);
+        surface.layer().addSublayer(spinner_surface.layer());
         let ivars = Ivars {
             window,
-            surface: RefCell::new(Surface::new(device, scale)),
+            surface: RefCell::new(surface),
+            spinner_surface: RefCell::new(spinner_surface),
+            spinner: RefCell::new(None),
             link: OnceCell::new(),
             layout: Cell::new(layout),
             tab_cells: RefCell::new(Vec::new()),
@@ -459,8 +472,30 @@ impl TerminalView {
         ivars.layout.set(layout);
         let size = NSSize::new(f64::from(layout.width), f64::from(layout.height));
         ivars.surface.borrow().layer().setDrawableSize(size);
+        self.place_spinner_surface(layout);
         ivars.overlay_dirty.set(true);
         self.draw();
+    }
+
+    /// Lays the spinner surface over the tab bar row, hidden until it is
+    /// drawn again.
+    fn place_spinner_surface(&self, layout: Layout) {
+        let ivars = self.ivars();
+        let surface = ivars.surface.borrow();
+        let spinner = ivars.spinner_surface.borrow();
+        let scale = surface.layer().contentsScale();
+        let height = f64::from(layout.area.cell_height);
+        let size = CGSize::new(f64::from(layout.width) / scale, height / scale);
+        let bounds = surface.layer().bounds();
+        let y = if surface.layer().isGeometryFlipped() { 0.0 } else { bounds.size.height - size.height };
+        // Moved, resized and hidden at once, not animated.
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        spinner.layer().setFrame(CGRect::new(CGPoint::new(0.0, y), size));
+        spinner.layer().setHidden(true);
+        CATransaction::commit();
+        spinner.layer().setDrawableSize(CGSize::new(f64::from(layout.width), height));
+        *ivars.spinner.borrow_mut() = None;
     }
 
     /// Draws if a visible pane or the window's own chrome changed. Returns
@@ -477,6 +512,7 @@ impl TerminalView {
             let config = &settings.config;
             let m = renderer.metrics();
             let mut chrome = Vec::new();
+            let mut spinner = None;
             if layout.tab_bar {
                 let cols = (layout.width / m.cell_width) as usize;
                 let bar = tab_bar::build(
@@ -489,6 +525,9 @@ impl TerminalView {
                     ivars.hover_tab.get(),
                 );
                 *ivars.tab_cells.borrow_mut() = bar.tabs;
+                if !bar.spinners.is_empty() && settings.error.is_none() {
+                    spinner = Some(SpinnerFrame { spinners: bar.spinners, background: bar.line.background, frame: 0 });
+                }
                 chrome.push(bar.line);
             }
             if let Some(err) = &settings.error {
@@ -594,7 +633,8 @@ impl TerminalView {
                 })
                 .collect();
             let surface = &mut ivars.surface.borrow_mut();
-            renderer.render(surface, &mut panes, &rects, &chrome, rgb(theme.background));
+            renderer.render(surface, &mut panes, &rects, &chrome, Some(rgb(theme.background)));
+            self.show_spinner(renderer, spinner);
             Some((cursor, m))
         })
         .flatten();
@@ -608,6 +648,26 @@ impl TerminalView {
             ));
         }
         true
+    }
+
+    /// Draws `spinner` on its surface if it differs from what is there, or
+    /// hides the surface for `None`.
+    fn show_spinner(&self, renderer: &mut Renderer, spinner: Option<SpinnerFrame>) {
+        let ivars = self.ivars();
+        if *ivars.spinner.borrow() == spinner {
+            return;
+        }
+        let surface = &mut ivars.spinner_surface.borrow_mut();
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        surface.layer().setHidden(spinner.is_none());
+        CATransaction::commit();
+        if let Some(spinner) = &spinner {
+            let lines = spinner.lines(renderer.metrics().cell_width as f32);
+            renderer.render(surface, &mut [], &[], &lines, None);
+            log::trace!("spinner presented");
+        }
+        *ivars.spinner.borrow_mut() = spinner;
     }
 
     fn set_focused(&self, focused: bool) {

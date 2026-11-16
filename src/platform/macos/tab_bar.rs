@@ -19,6 +19,16 @@ pub struct TabBar {
     pub line: Line,
     /// Each tab's cells, for clicks.
     pub tabs: Vec<Range<usize>>,
+    /// The marks of working tabs, left blank in `line`: they animate on a
+    /// layer of their own.
+    pub spinners: Vec<Spinner>,
+}
+
+/// A cell of the tab bar that shows rho's working spinner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Spinner {
+    pub cell: usize,
+    pub color: Rgb,
 }
 
 /// Lays out `tabs` across `cols` cells. Each reads `⠋ 2 dir `: rho's mark,
@@ -38,14 +48,16 @@ pub fn build(
     let background = if focused { theme.background } else { theme.inactive_titlebar_bg };
     let mut line = Line::new(0.0, 0.0, width, rgb(background));
     let mut ranges = Vec::new();
+    let mut spinners = Vec::new();
     for (i, tab) in tabs.iter().enumerate() {
         // The first tab starts clear of the window's rounded corner.
         let inset = if i == 0 { " " } else { "" };
         // A cell for a mark, so titles never shift when one appears. Only the
         // active tab's working spinner is colored; the others stay grey.
         let (blue, muted) = (theme.ansi[4], theme.ansi[8]);
+        let working = tab.info.rho == Some(RhoActivity::Working);
         let (mark, mark_color) = match tab.info.rho {
-            Some(RhoActivity::Working) => (animation::SPINNER[0], if tab.active { blue } else { muted }),
+            Some(RhoActivity::Working) => (' ', if tab.active { blue } else { muted }),
             Some(RhoActivity::Question) => ('?', blue),
             Some(RhoActivity::Stopped) => ('✕', theme.ansi[1]),
             Some(RhoActivity::Unread) => ('•', theme.ansi[2]),
@@ -65,14 +77,43 @@ pub fn build(
             (true, false) => theme.foreground,
         };
         line.push_str(&text, rgb(fg), CellStyle::default());
-        if let Some(cell) = line.cells.get_mut(start + inset.len()) {
+        let mark_cell = start + inset.len();
+        if let Some(cell) = line.cells.get_mut(mark_cell) {
             cell.fg = rgb(mark_color);
+        }
+        if working {
+            spinners.push(Spinner { cell: mark_cell, color: rgb(mark_color) });
         }
         ranges.push(start..line.cells.len());
         // The separator belongs to no tab.
         line.push_str(" ", rgb(theme.foreground), CellStyle::default());
     }
-    TabBar { line, tabs: ranges }
+    TabBar { line, tabs: ranges, spinners }
+}
+
+/// What the spinner layer shows: the working tabs' marks at `frame` of the
+/// spinner, each on a cell of the tab bar's `background`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpinnerFrame {
+    pub spinners: Vec<Spinner>,
+    pub background: Rgb,
+    pub frame: usize,
+}
+
+impl SpinnerFrame {
+    /// One line per mark, for a layer over the tab bar `cell_width` pixels
+    /// to a cell.
+    pub fn lines(&self, cell_width: f32) -> Vec<Line> {
+        let mark = animation::SPINNER[self.frame % animation::SPINNER.len()];
+        self.spinners
+            .iter()
+            .map(|s| {
+                let mut line = Line::new(s.cell as f32 * cell_width, 0.0, cell_width, self.background);
+                line.push_str(mark.encode_utf8(&mut [0; 4]), s.color, CellStyle::default());
+                line
+            })
+            .collect()
+    }
 }
 
 fn dir_name(path: &Path) -> String {
@@ -123,15 +164,27 @@ mod tests {
     }
 
     #[test]
-    fn a_working_tab_shows_the_spinner_blue_only_when_active() {
+    fn working_tabs_leave_their_mark_to_a_spinner_blue_only_when_active() {
         let rho = PaneInfo { cwd: Some("/a".into()), rho: Some(RhoActivity::Working), ..PaneInfo::default() };
         let tabs = [TabView { active: true, info: &rho }, TabView { active: false, info: &rho }];
         let theme = Theme::default();
         let bar = build(&tabs, &theme, 80, 32, 800.0, true, None);
-        assert_eq!(text(&bar), " ⠋ 1 a  ⠋ 2 a  ");
+        assert_eq!(text(&bar), "   1 a    2 a  ");
         let rgb = |[r, g, b]: config::Rgb| Rgb { r, g, b };
-        assert_eq!(bar.line.cells[1].fg, rgb(theme.ansi[4]));
-        assert_eq!(bar.line.cells[8].fg, rgb(theme.ansi[8]));
+        let spinner = |cell, color| Spinner { cell, color: rgb(color) };
+        assert_eq!(bar.spinners, vec![spinner(1, theme.ansi[4]), spinner(8, theme.ansi[8])]);
+    }
+
+    #[test]
+    fn the_spinner_layer_draws_each_mark_at_its_cell() {
+        let blue = Rgb { r: 0, g: 0, b: 255 };
+        let black = Rgb { r: 0, g: 0, b: 0 };
+        let frame = SpinnerFrame { spinners: vec![Spinner { cell: 3, color: blue }], background: black, frame: 12 };
+        let lines = frame.lines(10.0);
+        assert_eq!(lines.len(), 1);
+        assert_eq!((lines[0].x, lines[0].width, lines[0].background), (30.0, 10.0, black));
+        assert_eq!(lines[0].cells[0].text, crate::terminal::Grapheme::Char(animation::SPINNER[2]));
+        assert_eq!(lines[0].cells[0].fg, blue);
     }
 
     #[test]

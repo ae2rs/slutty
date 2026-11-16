@@ -143,7 +143,7 @@ impl Renderer {
         self.scenes.clear();
     }
 
-    /// Draws the panes into `surface` over `clear`, then `rects` (device
+    /// Draws the panes into `surface` over `clear` (transparent when `None`),
     /// pixels from the top-left), then the `chrome` lines. The surface keeps
     /// the instances.
     pub fn render(
@@ -152,7 +152,7 @@ impl Renderer {
         panes: &mut [PaneDraw<'_>],
         rects: &[RectInstance],
         chrome: &[Line],
-        clear: Rgb,
+        clear: Option<Rgb>,
     ) {
         surface.packed = Some(self.prepare(surface.layer.drawableSize(), panes, rects, chrome, clear));
         self.present(surface);
@@ -181,7 +181,7 @@ impl Renderer {
         panes: &mut [PaneDraw<'_>],
         rects: &[RectInstance],
         chrome: &[Line],
-        clear: Rgb,
+        clear: Option<Rgb>,
     ) -> Packed {
         self.scenes.retain(|id, _| panes.iter().any(|p| p.id == *id));
         if self.build(panes, chrome).is_err() {
@@ -250,8 +250,10 @@ impl Renderer {
         color.setLoadAction(MTLLoadAction::Clear);
         color.setStoreAction(MTLStoreAction::Store);
         let c = |v: u8| f64::from(v) / 255.0;
-        let clear = packed.clear;
-        color.setClearColor(MTLClearColor { red: c(clear.r), green: c(clear.g), blue: c(clear.b), alpha: 1.0 });
+        color.setClearColor(match packed.clear {
+            Some(rgb) => MTLClearColor { red: c(rgb.r), green: c(rgb.g), blue: c(rgb.b), alpha: 1.0 },
+            None => MTLClearColor { red: 0.0, green: 0.0, blue: 0.0, alpha: 0.0 },
+        });
 
         let commands = self.queue.commandBuffer().ok_or_else(|| err("no command buffer"))?;
         let encoder = commands.renderCommandEncoderWithDescriptor(&pass).ok_or_else(|| err("no encoder"))?;
@@ -298,6 +300,14 @@ impl Surface {
         Self { layer, packed: None }
     }
 
+    /// A surface whose layer shows what lies below it wherever nothing is
+    /// drawn; render it with no clear color.
+    pub fn transparent(device: &Device, scale: f64) -> Self {
+        let surface = Self::new(device, scale);
+        surface.layer.setOpaque(false);
+        surface
+    }
+
     pub fn layer(&self) -> &Retained<CAMetalLayer> {
         &self.layer
     }
@@ -308,7 +318,7 @@ struct Packed {
     /// `None` when there is nothing to draw but the clear color.
     buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
     batches: Vec<Placed>,
-    clear: Rgb,
+    clear: Option<Rgb>,
 }
 
 struct Placed {
@@ -323,7 +333,7 @@ enum Batch<'a> {
     Glyphs(&'a [GlyphInstance]),
 }
 
-fn pack(device: &Device, batches: &[(Uniforms, Batch<'_>)], clear: Rgb) -> Packed {
+fn pack(device: &Device, batches: &[(Uniforms, Batch<'_>)], clear: Option<Rgb>) -> Packed {
     // Buffer offsets must be aligned; 256 suits every Apple GPU.
     const ALIGN: usize = 256;
     let mut bytes = Vec::new();
@@ -419,7 +429,7 @@ mod tests {
 
         fn prepare(&mut self, panes: &mut [PaneDraw<'_>]) -> Packed {
             let size = CGSize::new(Self::SIZE as f64, Self::SIZE as f64);
-            self.renderer.prepare(size, panes, &[], &[], Rgb { r: 0, g: 0, b: 0 })
+            self.renderer.prepare(size, panes, &[], &[], Some(Rgb { r: 0, g: 0, b: 0 }))
         }
 
         /// Draws `packed` and reads back its top-left pixel as RGBA.
