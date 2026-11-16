@@ -948,8 +948,15 @@ struct PaneModes {
     copy_cursor: Option<(u16, u16)>,
 }
 
-const BOLD: CellStyle =
-    CellStyle { bold: true, italic: false, faint: false, underline: false, strikethrough: false, wide: false };
+const BOLD: CellStyle = CellStyle {
+    bold: true,
+    italic: false,
+    faint: false,
+    underline: false,
+    strikethrough: false,
+    blink: false,
+    wide: false,
+};
 
 /// Panes without the keyboard, as WezTerm's default `inactive_pane_hsb`.
 const INACTIVE: Tint = Tint { saturation: 0.9, brightness: 0.8 };

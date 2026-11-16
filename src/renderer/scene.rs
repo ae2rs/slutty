@@ -230,7 +230,7 @@ impl Scene {
 /// first cell of a wide character.
 fn cursor(frame: &Frame, overlay: &Overlay<'_>) -> Option<Cursor> {
     let mut cursor = match overlay.copy_cursor {
-        Some((x, y)) => Cursor { x, y, shape: CursorShape::Block, wide: false, color: None },
+        Some((x, y)) => Cursor { x, y, shape: CursorShape::Block, wide: false, color: None, blinking: false },
         None => frame.cursor?,
     };
     if cursor.wide {

@@ -32,6 +32,8 @@ pub struct CellStyle {
     pub faint: bool,
     pub underline: bool,
     pub strikethrough: bool,
+    /// SGR 5 or 6; libghostty keeps one flag for both.
+    pub blink: bool,
     /// The glyph spans this cell and the next.
     pub wide: bool,
 }
@@ -67,6 +69,9 @@ pub struct Cursor {
     pub shape: CursorShape,
     pub wide: bool,
     pub color: Option<Rgb>,
+    /// The program asked for a blinking cursor (DECSCUSR, mode 12), or left
+    /// the configured default.
+    pub blinking: bool,
 }
 
 #[derive(Debug)]
@@ -194,6 +199,7 @@ fn copy_row(
             style.faint = s.faint;
             style.underline = s.underline != Underline::None;
             style.strikethrough = s.strikethrough;
+            style.blink = s.blink;
             visible &= !s.invisible;
             if s.inverse {
                 let old_fg = fg;
@@ -225,5 +231,12 @@ fn cursor(snapshot: &Snapshot<'static, '_>, color: Option<Rgb>) -> libghostty_vt
         CursorVisualStyle::BlockHollow => CursorShape::BlockHollow,
         _ => CursorShape::Block,
     };
-    Ok(Some(Cursor { x: viewport.x, y: viewport.y, shape, wide: viewport.at_wide_tail, color }))
+    Ok(Some(Cursor {
+        x: viewport.x,
+        y: viewport.y,
+        shape,
+        wide: viewport.at_wide_tail,
+        color,
+        blinking: cursor.blinking,
+    }))
 }

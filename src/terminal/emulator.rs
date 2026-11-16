@@ -548,6 +548,17 @@ mod tests {
     }
 
     #[test]
+    fn marks_blinking_text_and_a_blinking_cursor() {
+        let mut t = terminal();
+        t.write(b"a\x1b[5mb\x1b[25m\x1b[6mc\x1b[0m");
+        let blinks: Vec<bool> = t.frame().rows[0].cells[..3].iter().map(|c| c.style.blink).collect();
+        assert_eq!(blinks, [false, true, true], "SGR 5 and 6 both blink");
+        assert_eq!(t.frame().cursor.map(|c| c.blinking), Some(false), "steady by default");
+        t.write(b"\x1b[5 q");
+        assert_eq!(t.frame().cursor.map(|c| c.blinking), Some(true));
+    }
+
+    #[test]
     fn frame_is_clean_until_output_arrives() {
         let mut t = terminal();
         t.write(b"a");
