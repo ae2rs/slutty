@@ -16,6 +16,10 @@ use crate::terminal::CellStyle;
 /// The longest directory name shown before it is cut with `…`.
 const CWD_MAX: usize = 10;
 
+/// Cells the tab bar keeps clear at each end, under the window's rounded
+/// corners.
+pub const EDGE: usize = 2;
+
 pub struct TabBar {
     pub line: Line,
     /// Each tab's cells, for clicks.
@@ -51,8 +55,7 @@ pub fn build(
     let mut ranges = Vec::new();
     let mut spinners = Vec::new();
     for (i, tab) in tabs.iter().enumerate() {
-        // The first tab starts clear of the window's rounded corner.
-        let inset = if i == 0 { " " } else { "" };
+        let inset = if i == 0 { " ".repeat(EDGE) } else { String::new() };
         // A cell for a mark, so titles never shift when one appears. Only the
         // active tab's working spinner is colored; the others stay grey.
         let (blue, muted) = (theme.ansi[4], theme.ansi[8]);
@@ -178,20 +181,20 @@ mod tests {
         let long = PaneInfo { cwd: Some("/src/a-very-long-name".into()), ..PaneInfo::default() };
         let tabs = [TabView { active: false, info: &home }, TabView { active: true, info: &long }];
         let bar = build(&tabs, &Theme::default(), 80, 32, 800.0, true, None);
-        assert_eq!(text(&bar), "   1 me    2 a-very-lo…  ");
-        assert_eq!(bar.tabs, vec![0..8, 9..24]);
-        assert_eq!(bar.line.cells[10].fg, bar.line.cells[11].fg);
-        assert_ne!(bar.line.cells[1].fg, bar.line.cells[10].fg, "the active tab stands out");
+        assert_eq!(text(&bar), "    1 me    2 a-very-lo…  ");
+        assert_eq!(bar.tabs, vec![0..9, 10..25]);
+        assert_eq!(bar.line.cells[11].fg, bar.line.cells[12].fg);
+        assert_ne!(bar.line.cells[2].fg, bar.line.cells[11].fg, "the active tab stands out");
     }
 
     #[test]
     fn rho_marks_its_tab() {
         let rho = PaneInfo { cwd: Some("/a".into()), rho: Some(RhoActivity::Question), ..PaneInfo::default() };
         let bar = build(&[TabView { active: true, info: &rho }], &Theme::default(), 80, 32, 800.0, true, None);
-        assert_eq!(text(&bar), " ? 1 a  ");
+        assert_eq!(text(&bar), "  ? 1 a  ");
         let [r, g, b] = Theme::default().ansi[4];
-        assert_eq!(bar.line.cells[1].fg, Rgb { r, g, b }, "the mark has its own color");
-        assert_ne!(bar.line.cells[1].fg, bar.line.cells[3].fg);
+        assert_eq!(bar.line.cells[2].fg, Rgb { r, g, b }, "the mark has its own color");
+        assert_ne!(bar.line.cells[2].fg, bar.line.cells[4].fg);
     }
 
     #[test]
@@ -200,10 +203,10 @@ mod tests {
         let tabs = [TabView { active: true, info: &rho }, TabView { active: false, info: &rho }];
         let theme = Theme::default();
         let bar = build(&tabs, &theme, 80, 32, 800.0, true, None);
-        assert_eq!(text(&bar), "   1 a    2 a  ");
+        assert_eq!(text(&bar), "    1 a    2 a  ");
         let rgb = |[r, g, b]: config::Rgb| Rgb { r, g, b };
         let spinner = |cell, color| Spinner { cell, color: rgb(color) };
-        assert_eq!(bar.spinners, vec![spinner(1, theme.ansi[4]), spinner(8, theme.ansi[8])]);
+        assert_eq!(bar.spinners, vec![spinner(2, theme.ansi[4]), spinner(9, theme.ansi[8])]);
     }
 
     #[test]
@@ -242,7 +245,7 @@ mod tests {
         let root = PaneInfo { cwd: Some("/".into()), ..PaneInfo::default() };
         let tabs = [TabView { active: true, info: &root }, TabView { active: false, info: &root }];
         let bar = build(&tabs, &Theme::default(), 10, 32, 100.0, true, None);
-        assert_eq!(text(&bar), "   1 /  ");
+        assert_eq!(text(&bar), "    1 /  ");
         assert_eq!(bar.tabs.len(), 1);
     }
 
@@ -255,9 +258,9 @@ mod tests {
         let bar = build(&tabs, &theme, 80, 32, 800.0, false, None);
         let rgb = |[r, g, b]: config::Rgb| Rgb { r, g, b };
         assert_eq!(bar.line.background, rgb(theme.inactive_titlebar_bg));
-        assert_eq!(text(&bar), " ✕ 1 a    2 b  ");
-        assert_eq!(bar.line.cells[1].fg, rgb(theme.ansi[1]), "the mark keeps its color");
-        for i in [3, 5, 10, 12] {
+        assert_eq!(text(&bar), "  ✕ 1 a    2 b  ");
+        assert_eq!(bar.line.cells[2].fg, rgb(theme.ansi[1]), "the mark keeps its color");
+        for i in [4, 6, 11, 13] {
             assert_eq!(bar.line.cells[i].fg, rgb(theme.inactive_titlebar_fg), "cell {i}");
         }
     }
@@ -269,9 +272,9 @@ mod tests {
         let theme = Theme::default();
         let rgb = |[r, g, b]: config::Rgb| Rgb { r, g, b };
         let bar = build(&tabs, &theme, 80, 32, 800.0, true, Some(1));
-        assert_eq!(bar.line.cells[10].fg, rgb(theme.ansi[6]));
+        assert_eq!(bar.line.cells[11].fg, rgb(theme.ansi[6]));
         let bar = build(&tabs, &theme, 80, 32, 800.0, true, Some(0));
-        assert_eq!(bar.line.cells[3].fg, rgb(theme.ansi[3]), "the active tab stays yellow");
-        assert_eq!(bar.line.cells[10].fg, rgb(theme.foreground));
+        assert_eq!(bar.line.cells[4].fg, rgb(theme.ansi[3]), "the active tab stays yellow");
+        assert_eq!(bar.line.cells[11].fg, rgb(theme.foreground));
     }
 }
