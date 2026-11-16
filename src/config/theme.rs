@@ -10,6 +10,8 @@ pub struct Theme {
     pub background: Rgb,
     pub foreground: Rgb,
     pub cursor: Rgb,
+    /// The line between split panes.
+    pub split: Rgb,
     /// The 16 ANSI colors: normal then bright.
     pub ansi: [Rgb; 16],
 }
@@ -21,6 +23,8 @@ impl Theme {
             background: hex(0x1a1b26),
             foreground: hex(0xc0caf5),
             cursor: hex(0xc0caf5),
+            // WezTerm's default; the scheme sets none.
+            split: hex(0x444444),
             ansi: [
                 hex(0x15161e),
                 hex(0xf7768e),
@@ -75,6 +79,7 @@ struct Colors {
     background: Option<Hex>,
     foreground: Option<Hex>,
     cursor: Option<Hex>,
+    split: Option<Hex>,
     ansi: Option<[Hex; 8]>,
     brights: Option<[Hex; 8]>,
 }
@@ -89,6 +94,7 @@ impl From<ThemeFile> for Theme {
             (&mut theme.background, c.background),
             (&mut theme.foreground, c.foreground),
             (&mut theme.cursor, c.cursor),
+            (&mut theme.split, c.split),
         ] {
             if let Some(Hex(rgb)) = color {
                 *slot = rgb;
