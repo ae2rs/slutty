@@ -30,8 +30,8 @@ use super::state::{self, App, with_app};
 use super::tab_bar;
 use crate::config::{self, Config, OptionAsAlt};
 use crate::keys::Outcome;
-use crate::mux::{PaneId, WindowId};
-use crate::renderer::{Line, Overlay, PIXEL_FORMAT, PaneDraw};
+use crate::mux::{Axis, PaneId, Rect, Visible, WindowId};
+use crate::renderer::{Line, Overlay, PIXEL_FORMAT, PaneDraw, RectInstance};
 use crate::terminal::{CellStyle, KeyInput, MouseInput};
 
 pub struct Ivars {
@@ -52,6 +52,10 @@ pub struct Ivars {
     cursor_rect: Cell<NSRect>,
     /// Fractions of a line left over from trackpad scrolling.
     scroll_remainder: Cell<f64>,
+    /// The pane a mouse button went down in; drags and the release go there.
+    mouse_pane: Cell<Option<PaneId>>,
+    /// While picking a pane, each pane's label; empty otherwise.
+    pane_labels: RefCell<Vec<(char, PaneId)>>,
 }
 
 define_class!(
@@ -145,14 +149,28 @@ define_class!(
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
-            if !self.click_tab_bar(event) {
-                self.send_mouse(event, mouse::Action::Press, Some(mouse::Button::Left));
+            if self.click_tab_bar(event) {
+                return;
             }
+            // A click in another pane makes it active, and goes on to it.
+            let point = self.pixel_point(event);
+            let window = self.ivars().window;
+            let pane = with_app(|app| {
+                let (pane, ..) = self.pane_at(app, point)?;
+                if app.mux.active_pane(window) != Some(pane) {
+                    app.mux.activate_pane(window, pane);
+                }
+                Some(pane)
+            });
+            self.ivars().mouse_pane.set(pane.flatten());
+            self.tabs_changed();
+            self.send_mouse(event, mouse::Action::Press, Some(mouse::Button::Left));
         }
 
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, event: &NSEvent) {
             self.send_mouse(event, mouse::Action::Release, Some(mouse::Button::Left));
+            self.ivars().mouse_pane.set(None);
         }
 
         #[unsafe(method(mouseDragged:))]
@@ -346,6 +364,8 @@ impl TerminalView {
             overlay_dirty: Cell::new(true),
             cursor_rect: Cell::new(NSRect::ZERO),
             scroll_remainder: Cell::new(0.0),
+            mouse_pane: Cell::new(None),
+            pane_labels: RefCell::new(Vec::new()),
         };
         let this = Self::alloc(mtm).set_ivars(ivars);
         let view: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
@@ -450,38 +470,58 @@ impl TerminalView {
                 chrome.push(banner(err, config, layout));
             }
             let active = mux.active_pane(window);
-            let visible = mux.visible(window);
+            let Visible { panes: visible, dividers } = mux.visible(window);
             if !overlay_dirty && !visible.iter().any(|(_, _, frame)| frame.changed) {
                 return None;
             }
-            let several = visible.len() > 1;
+            let theme = &config.theme;
+            let cell = |x: u16, y: u16| {
+                [layout.origin[0] + u32::from(x) * m.cell_width, layout.origin[1] + u32::from(y) * m.cell_height]
+                    .map(|v| v as f32)
+            };
+            let (cw, ch) = (m.cell_width as f32, m.cell_height as f32);
+            let mut rects = Vec::new();
+            if visible.len() > 1 {
+                for (id, rect, _) in &visible {
+                    if Some(*id) != active {
+                        let size = [f32::from(rect.cols) * cw, f32::from(rect.rows) * ch];
+                        rects.push(RectInstance::new(cell(rect.x, rect.y), size, DIM));
+                    }
+                }
+            }
+            let [r, g, b] = theme.split;
+            let stroke = m.stroke.max(1) as f32;
+            for (axis, rect) in &dividers {
+                let [x, y] = cell(rect.x, rect.y);
+                let (pos, size) = match axis {
+                    // A vertical line down the middle of the gap column.
+                    Axis::Row => ([x + (cw - stroke) / 2.0, y], [stroke, f32::from(rect.rows) * ch]),
+                    Axis::Column => ([x, y + (ch - stroke) / 2.0], [f32::from(rect.cols) * cw, stroke]),
+                };
+                rects.push(RectInstance::new(pos, size, [r, g, b, 255]));
+            }
+            for (label, pane) in ivars.pane_labels.borrow().iter() {
+                let Some((_, rect, _)) = visible.iter().find(|(id, ..)| id == pane) else { continue };
+                let [x, y] = cell(rect.x + rect.cols.saturating_sub(3) / 2, rect.y + rect.rows / 2);
+                let mut line = Line::new(x, y, 3.0 * cw, rgb(theme.ansi[4]));
+                let style = CellStyle { bold: true, ..CellStyle::default() };
+                line.push_str(&format!(" {label} "), rgb(theme.background), style);
+                chrome.push(line);
+            }
             let mut cursor = None;
             let mut panes: Vec<PaneDraw<'_>> = visible
                 .into_iter()
                 .map(|(id, rect, frame)| {
                     let is_active = Some(id) == active;
-                    let origin = [
-                        layout.origin[0] + u32::from(rect.x) * m.cell_width,
-                        layout.origin[1] + u32::from(rect.y) * m.cell_height,
-                    ];
+                    let origin = cell(rect.x, rect.y);
                     if is_active && let Some(c) = frame.cursor {
-                        cursor = Some([
-                            origin[0] + u32::from(c.x) * m.cell_width,
-                            origin[1] + u32::from(c.y) * m.cell_height,
-                        ]);
+                        cursor = Some([origin[0] + f32::from(c.x) * cw, origin[1] + f32::from(c.y) * ch]);
                     }
                     let preedit = if is_active { marked.as_str() } else { "" };
-                    PaneDraw {
-                        id,
-                        frame,
-                        origin: origin.map(|v| v as f32),
-                        overlay: Overlay { focused: focused && is_active, preedit },
-                        dim: several && !is_active,
-                    }
+                    PaneDraw { id, frame, origin, overlay: Overlay { focused: focused && is_active, preedit } }
                 })
                 .collect();
-            let [r, g, b] = config.theme.background;
-            renderer.render(&ivars.layer, &mut panes, &chrome, Rgb { r, g, b });
+            renderer.render(&ivars.layer, &mut panes, &rects, &chrome, rgb(theme.background));
             Some((cursor, m))
         })
         .flatten();
@@ -512,13 +552,32 @@ impl TerminalView {
         [point.x * s, point.y * s]
     }
 
-    /// The pane under a point, with the point relative to the pane.
+    /// The pane under a point, or the one a mouse button went down in, with
+    /// the point relative to that pane.
     fn pane_at(&self, app: &mut App, [x, y]: [f64; 2]) -> Option<(PaneId, f32, f32)> {
-        let layout = self.ivars().layout.get();
-        let pane = app.mux.active_pane(self.ivars().window)?;
-        let x = x - f64::from(layout.origin[0]);
-        let y = y - f64::from(layout.origin[1]);
-        Some((pane, x as f32, y as f32))
+        let ivars = self.ivars();
+        let layout = ivars.layout.get();
+        let m = app.renderer.metrics();
+        let panes = app.mux.layout(ivars.window).panes;
+        let corner = |rect: Rect| {
+            let x = f64::from(layout.origin[0] + u32::from(rect.x) * m.cell_width);
+            let y = f64::from(layout.origin[1] + u32::from(rect.y) * m.cell_height);
+            (
+                x,
+                y,
+                x + f64::from(u32::from(rect.cols) * m.cell_width),
+                y + f64::from(u32::from(rect.rows) * m.cell_height),
+            )
+        };
+        let (pane, rect) = match ivars.mouse_pane.get() {
+            Some(captured) => *panes.iter().find(|(id, _)| *id == captured)?,
+            None => *panes.iter().find(|(_, rect)| {
+                let (left, top, right, bottom) = corner(*rect);
+                (left..right).contains(&x) && (top..bottom).contains(&y)
+            })?,
+        };
+        let (left, top, ..) = corner(rect);
+        Some((pane, (x - left) as f32, (y - top) as f32))
     }
 
     /// Activates the tab under a click in the tab bar. Returns whether the
@@ -557,6 +616,9 @@ impl TerminalView {
     fn bind_key(&self, event: &NSEvent) -> bool {
         if !self.ivars().marked.borrow().is_empty() {
             return false;
+        }
+        if self.pick_pane(event) {
+            return true;
         }
         let typed = |flags| event.charactersByApplyingModifiers(flags).and_then(|s| s.to_string().chars().next());
         let code = event.keyCode();
@@ -694,6 +756,41 @@ impl TerminalView {
     }
 }
 
+/// Labels for pane select, as in Lucas's WezTerm setup.
+const PANE_LABELS: &str = "asdfghjkl;";
+
+impl TerminalView {
+    /// Labels the visible panes; the next key picks one.
+    pub(super) fn start_pane_select(&self) {
+        let window = self.ivars().window;
+        let Some(layout) = with_app(|app| app.mux.layout(window)) else { return };
+        *self.ivars().pane_labels.borrow_mut() =
+            PANE_LABELS.chars().zip(layout.panes.iter().map(|(id, _)| *id)).collect();
+        self.ivars().overlay_dirty.set(true);
+        self.request_frame();
+    }
+
+    /// While picking a pane, takes the key: a label activates its pane, and
+    /// any other key cancels. Returns whether it took the key.
+    fn pick_pane(&self, event: &NSEvent) -> bool {
+        let labels = std::mem::take(&mut *self.ivars().pane_labels.borrow_mut());
+        if labels.is_empty() {
+            return false;
+        }
+        let typed = event.charactersIgnoringModifiers().and_then(|s| s.to_string().chars().next());
+        let window = self.ivars().window;
+        let code = event.keyCode();
+        with_app(|app| {
+            app.swallowed.push(code);
+            if let Some((_, pane)) = labels.iter().find(|(label, _)| Some(*label) == typed) {
+                app.mux.activate_pane(window, *pane);
+            }
+        });
+        self.tabs_changed();
+        true
+    }
+}
+
 fn pane_mut(app: &mut App, pane: PaneId, f: impl FnOnce(&mut crate::mux::Pane)) {
     if let Some(pane) = app.mux.pane_mut(pane) {
         f(pane);
@@ -702,13 +799,20 @@ fn pane_mut(app: &mut App, pane: PaneId, f: impl FnOnce(&mut crate::mux::Pane)) 
 
 /// A line across the top that says why the config file is not in effect.
 fn banner(error: &str, config: &Config, layout: Layout) -> Line {
-    let rgb = |[r, g, b]: config::Rgb| Rgb { r, g, b };
     let theme = &config.theme;
     let mut line = Line::new(0.0, 0.0, layout.width as f32, rgb(theme.ansi[1]));
     let fits = (layout.width / layout.area.cell_width) as usize;
     let text: String = format!(" {error}").chars().take(fits).collect();
     line.push_str(&text, rgb(theme.background), CellStyle { bold: true, ..CellStyle::default() });
     line
+}
+
+/// Black at a fifth over panes without the keyboard: WezTerm's inactive
+/// panes, at 0.8 brightness.
+const DIM: [u8; 4] = [0, 0, 0, 51];
+
+fn rgb([r, g, b]: config::Rgb) -> Rgb {
+    Rgb { r, g, b }
 }
 
 /// The text of an NSString or NSAttributedString from the input system.

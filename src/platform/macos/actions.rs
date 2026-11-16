@@ -8,6 +8,7 @@ use objc2_foundation::NSString;
 use super::state::{self, with_app};
 use super::view::TerminalView;
 use crate::keys::Action;
+use crate::mux::Axis;
 use crate::terminal::KeyInput;
 
 impl TerminalView {
@@ -72,6 +73,45 @@ impl TerminalView {
                 with_app(|app| app.tab_bar = !app.tab_bar);
                 state::views().iter().for_each(|view| view.relayout());
             }
+            Action::SplitRight | Action::SplitDown => {
+                let axis = if action == Action::SplitRight { Axis::Row } else { Axis::Column };
+                if let Some(Err(err)) = with_app(|app| app.mux.split(window, axis, &app.settings.config)) {
+                    log::error!("splitting failed: {err}");
+                }
+                self.tabs_changed();
+            }
+            Action::ClosePane { confirm } => {
+                let busy = with_app(|app| app.mux.active_pane_busy(window)).unwrap_or(false);
+                // The alert runs the event loop, so the app is not borrowed here.
+                if confirm
+                    && busy
+                    && !alert(self.mtm(), "Close this pane?", "A program is still running in it.", "Close")
+                {
+                    return;
+                }
+                if with_app(|app| app.mux.close_pane(window)) == Some(true) {
+                    self.close_window();
+                } else {
+                    self.tabs_changed();
+                }
+            }
+            Action::FocusPane { direction } => {
+                with_app(|app| app.mux.focus_direction(window, direction));
+                self.tabs_changed();
+            }
+            Action::ResizePane { direction, cells } => {
+                with_app(|app| app.mux.resize_pane(window, direction, cells));
+                self.tabs_changed();
+            }
+            Action::ToggleZoom => {
+                with_app(|app| app.mux.toggle_zoom(window));
+                self.tabs_changed();
+            }
+            Action::RotatePanes => {
+                with_app(|app| app.mux.rotate_panes(window));
+                self.tabs_changed();
+            }
+            Action::PaneSelect => self.start_pane_select(),
             // The matcher runs these itself.
             Action::KeyTable { .. } | Action::PopTable => {}
         }
