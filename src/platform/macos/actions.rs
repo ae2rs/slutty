@@ -7,6 +7,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSString, NSURL};
 
+use super::app;
 use super::state::{self, with_app};
 use super::view::TerminalView;
 use crate::keys::Action;
@@ -74,6 +75,19 @@ impl TerminalView {
             Action::ToggleTabBar => {
                 with_app(|app| app.tab_bar = !app.tab_bar);
                 state::views().iter().for_each(|view| view.relayout());
+            }
+            Action::NewWindow => {
+                let cwd = with_app(|app| app.mux.active_cwd(window)).flatten();
+                app::open_window(self.mtm(), cwd.as_deref(), self.window().as_deref());
+            }
+            Action::PopPane | Action::PopTab => {
+                let popped = with_app(|app| {
+                    if action == Action::PopPane { app.mux.pop_pane(window) } else { app.mux.pop_tab(window) }
+                });
+                if let Some(popped) = popped.flatten() {
+                    app::show_window(self.mtm(), popped, self.bounds().size, self.window().as_deref());
+                    self.tabs_changed();
+                }
             }
             Action::SplitRight | Action::SplitDown => {
                 let axis = if action == Action::SplitRight { Axis::Row } else { Axis::Column };

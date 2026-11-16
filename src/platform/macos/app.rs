@@ -9,7 +9,7 @@ use objc2_app_kit::{
     NSBackingStoreType, NSEventModifierFlags, NSMenu, NSMenuItem, NSScreen, NSWindow, NSWindowButton,
     NSWindowStyleMask, NSWindowTitleVisibility,
 };
-use objc2_foundation::{NSObject, NSPoint, NSRect, NSString};
+use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize, NSString};
 
 use super::actions;
 use super::layout::{self, Layout};
@@ -17,7 +17,7 @@ use super::state::{self, App, Settings, with_app};
 use super::view::TerminalView;
 use crate::config::{self, Config};
 use crate::font::Fonts;
-use crate::mux::Mux;
+use crate::mux::{Mux, WindowId};
 use crate::renderer::Renderer;
 
 define_class!(
@@ -98,7 +98,7 @@ pub fn run(config_path: Option<PathBuf>) -> ExitCode {
         };
     App::start(Mux::new(state::wake_from_any_thread), renderer, settings, scale);
 
-    if !open_window(mtm, None) {
+    if !open_window(mtm, None, None) {
         return ExitCode::FAILURE;
     }
     app.activate();
@@ -106,24 +106,38 @@ pub fn run(config_path: Option<PathBuf>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Opens a window with one tab running the login shell in `cwd`. Returns
-/// whether it opened.
-pub(super) fn open_window(mtm: MainThreadMarker, cwd: Option<&Path>) -> bool {
+/// Opens a window with one tab running the login shell in `cwd`, cascaded
+/// from `after` or else centered. Returns whether it opened.
+pub(super) fn open_window(mtm: MainThreadMarker, cwd: Option<&Path>, after: Option<&NSWindow>) -> bool {
     let opened = with_app(|app| {
         let m = app.renderer.metrics();
         let size = layout::content_size(app.config(), m, app.scale, app.tab_bar);
         let layout = Layout::new(size, app.scale, m, app.config().window.padding, app.tab_bar);
         let id = app.mux.open_window(layout.area, &app.settings.config, cwd)?;
-        Ok::<_, std::io::Error>((id, layout, size, app.renderer.device().retain(), app.scale))
+        Ok::<_, std::io::Error>((id, size))
     });
-    let (id, layout, size, device, scale) = match opened {
-        Some(Ok(opened)) => opened,
+    match opened {
+        Some(Ok((id, size))) => {
+            show_window(mtm, id, size, after);
+            true
+        }
         Some(Err(err)) => {
             log::error!("starting the shell failed: {err}");
-            return false;
+            false
         }
-        None => return false,
-    };
+        None => false,
+    }
+}
+
+/// Shows mux window `id` in an NSWindow whose content is `size` points,
+/// cascaded from `after` or else centered.
+pub(super) fn show_window(mtm: MainThreadMarker, id: WindowId, size: NSSize, after: Option<&NSWindow>) {
+    let made = with_app(|app| {
+        let m = app.renderer.metrics();
+        let layout = Layout::new(size, app.scale, m, app.config().window.padding, app.tab_bar);
+        (layout, app.renderer.device().retain(), app.scale)
+    });
+    let Some((layout, device, scale)) = made else { return };
     // Made outside `with_app`: AppKit sizes the view as it starts, which
     // relays it out.
     let view = TerminalView::new(mtm, NSRect::new(NSPoint::new(0.0, 0.0), size), id, layout, &device, scale);
@@ -149,13 +163,16 @@ pub(super) fn open_window(mtm: MainThreadMarker, cwd: Option<&Path>) -> bool {
     window.setTitle(&NSString::from_str("slutty"));
     window.setContentView(Some(&view));
     hide_titlebar(&window);
-    window.center();
+    match after {
+        // A zero point leaves `after` in place and gives the next spot.
+        Some(after) => _ = window.cascadeTopLeftFromPoint(after.cascadeTopLeftFromPoint(NSPoint::ZERO)),
+        None => window.center(),
+    }
     window.setDelegate(Some(ProtocolObject::from_ref(&*view)));
     window.makeFirstResponder(Some(&view));
     state::add_view(view.mux_window(), view.clone());
     view.start();
     window.makeKeyAndOrderFront(None);
-    true
 }
 
 /// Hides the title bar and its traffic lights, like WezTerm's
