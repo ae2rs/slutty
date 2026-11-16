@@ -163,7 +163,7 @@ libghostty-vt is a C library. It turns the bytes a program writes into terminal 
 
 - Wheel: scroll the viewport through scrollback. When the program tracks the mouse, send wheel buttons instead.
 - Clicks and motion go through the mouse encoder when the program tracks the mouse.
-- Selection comes in a later milestone.
+- Selection comes in M5: WezTerm's default mouse bindings (see the inventory).
 
 ## PTY
 
@@ -184,7 +184,7 @@ Taken from `~/dotfiles/wezterm/.config/wezterm/`. Milestones refer to the [roadm
 | Tokyo Night colors | `color_scheme` | Keep. Built-in default theme. | M1 (hardcoded), M2 (config) |
 | JetBrains Mono 16, line height 1 | `font`, `font_size`, `line_height` | Keep. | M1 (hardcoded), M2 |
 | Bold as DemiBold, half as ExtraLight | `font_rules` | Keep as weight settings, not rules. | M2 |
-| Ligatures | WezTerm default | Keep. Needs run shaping. | M7 |
+| Ligatures | WezTerm default | Keep. Needs run shaping. Part of parity. | M7 |
 | Steady bar cursor | `default_cursor_style` | Keep. Programs can still change it. | M1 |
 | No bell sound | `audible_bell` | Keep. Bell does nothing by default. | M1 |
 | No close confirmation | `window_close_confirmation` | Keep. | M1 |
@@ -198,11 +198,11 @@ Taken from `~/dotfiles/wezterm/.config/wezterm/`. Milestones refer to the [roadm
 | Feature | WezTerm binding | Decision | Milestone |
 | --- | --- | --- | --- |
 | Leader `ctrl+s`, no timeout | `leader` | Keep. | M2 |
-| No default bindings | `disable_default_key_bindings` | Keep. Defaults ship as a config file the user owns. | M2 |
+| No default bindings | `disable_default_key_bindings` | Ship my bindings as slutty's defaults instead. `keys.defaults = false` empties them. | M2 |
 | Kitty keyboard protocol | `enable_kitty_keyboard` | Keep. Always on; programs opt in. | M1 |
 | Copy, paste | `cmd+c`, `cmd+v` | Keep. | M1 |
 | Font size | `cmd/ctrl + - = 0` | Keep. | M2 |
-| Cmd+q asks first | `InputSelector` | Keep as a native alert. | M2 |
+| Cmd+q asks first | `InputSelector` | Keep as a native alert, also for Quit from the Dock. | M2 |
 | Cmd/Opt arrows, cmd+backspace remaps | `SendString`, `SendKey` | Keep as `send` actions. | M2 |
 | Fullscreen | `alt+enter` | Keep, native fullscreen. | M6 |
 | Spawn window | `cmd+n` | Keep. | M6 |
@@ -212,7 +212,7 @@ Taken from `~/dotfiles/wezterm/.config/wezterm/`. Milestones refer to the [roadm
 
 | Feature | WezTerm binding | Decision | Milestone |
 | --- | --- | --- | --- |
-| New tab, close tab | `leader t`, `cmd+t`, `cmd+w` | Keep. | M3 |
+| New tab, close tab | `leader t`, `cmd+t`, `cmd+w` | Keep. Closing asks only when the foreground process is not a shell, like WezTerm. | M3 |
 | Go to tab 1-9, last | `leader/cmd + 1-9, 0` | Keep. | M3 |
 | Tab bar: index and cwd | tabline plugin | Keep. Cwd from OSC 7. | M3 |
 | Toggle tab bar | `leader/cmd+Z` | Keep. | M3 |
@@ -220,7 +220,7 @@ Taken from `~/dotfiles/wezterm/.config/wezterm/`. Milestones refer to the [roadm
 | Max tab width 32 | `tab_max_width` | Keep. | M3 |
 | Window title `[i/n] title` | WezTerm default | Keep. AeroSpace finds windows by it. | M3 |
 | RAM, CPU, net, disk widgets | tabline + `popen` every 2 s | Drop for now. Polling breaks the idle rule. Maybe later as an opt-in widget. | M8 |
-| Animated rho star at 60 fps | `animation_fps`, blink easing | Drop the animation. Show a static glyph per state. | M6 |
+| Animated rho star at 60 fps | `animation_fps`, blink easing | Drop the animation. Show a static glyph per state: ✦ working, ? question, ✕ stopped, • unread. | M6 |
 
 ### Panes
 
@@ -231,6 +231,7 @@ Taken from `~/dotfiles/wezterm/.config/wezterm/`. Milestones refer to the [roadm
 | Resize pane | `leader shift+hjkl`, resize key table | Keep. | M4 |
 | Close pane, confirm | `leader x` | Keep. | M4 |
 | Zoom pane | `leader/cmd+z` | Keep. | M4 |
+| Dim inactive panes | WezTerm default `inactive_pane_hsb` | Keep: saturation 0.9, brightness 0.8. | M4 |
 | Rotate panes | `leader/cmd+e` | Keep. | M4 |
 | Pane select by letter | `leader/cmd+p` | Keep. | M4 |
 | Pop pane or tab to a new window | `leader m`, `leader M` | Keep. Simple in-process with our own mux. | M6 |
@@ -241,7 +242,9 @@ Taken from `~/dotfiles/wezterm/.config/wezterm/`. Milestones refer to the [roadm
 | --- | --- | --- | --- |
 | 100 000 lines of scrollback | `scrollback_lines` | Keep. | M1 |
 | Wheel scrolls 5 lines | `mouse_bindings` | Keep. | M1 |
-| Mouse selection | WezTerm default | Keep. libghostty has selection. | M5 |
+| Mouse selection | WezTerm default | Keep. Drag, double-click word, triple-click line, shift extends, alt makes a rectangle. libghostty has selection. | M5 |
+| Copy on release | WezTerm default | Keep. Releasing a selection copies it to the clipboard. | M5 |
+| Open links on click | WezTerm default | Keep. OSC 8 links and plain URLs. | M5 |
 | Copy mode (vim keys) | `ActivateCopyMode` | Keep. | M5 |
 | Search | `cmd+f` | Keep. libghostty has search. | M5 |
 | Quick select | `leader space` | Keep. | M5 |
@@ -253,8 +256,8 @@ Taken from `~/dotfiles/wezterm/.config/wezterm/`. Milestones refer to the [roadm
 | --- | --- | --- | --- |
 | `rho_activity` glyph in the tab | user var, `format-tab-title` | Keep. Built in, no scripting. | M6 |
 | Copy mode over rho's transcript | `rho_scrollback` user var, `ctrl+s` handoff | Keep. Built in. | M6 |
-| Click a notification to focus a pane | `focus_pane` user var | Keep. Raise window and tab, then AeroSpace. | M6 |
-| AeroSpace focus across workspaces | `aerospace list-windows` by title | Keep. rho must learn slutty's bundle id. | M6 |
+| Click a notification to focus a pane | `focus_pane` user var, `alerter` | Replace with native notifications: OSC 9/777 become `UNUserNotification`s that carry the pane. A click raises window, tab and pane. Falls back to `alerter` and `focus_pane` if an ad-hoc signed app cannot post. | M6 |
+| AeroSpace focus across workspaces | `aerospace list-windows` by title | Keep. `aerospace focus --window-id` with our own window number; no title matching. rho must learn `TERM_PROGRAM=slutty`. | M6 |
 
 ### Dropped
 
@@ -307,7 +310,8 @@ Each milestone is one PR. Each must keep the idle rule: no work while nothing ch
 ### M6: Windows and rho
 
 - Several windows. New window. Pop pane or tab out. Fullscreen.
-- User vars through `on_unknown_sequence`. rho activity glyph, transcript copy mode, `focus_pane`, AeroSpace focus.
+- User vars through `on_unknown_sequence`. rho activity glyph, transcript copy mode.
+- Native notifications for OSC 9/777; a click focuses the pane, then AeroSpace.
 
 ### M7: Font shaping
 
@@ -318,7 +322,7 @@ Each milestone is one PR. Each must keep the idle rule: no work while nothing ch
 - Cursor blink with an idle cut-off. Blinking text.
 - Optional status widgets, off by default.
 
-WezTerm parity for my use is reached after M6.
+WezTerm parity for my use is reached after M7.
 
 ## Config
 
@@ -368,7 +372,7 @@ title = ["rho", "index", "cwd"] # parts, in order
 
 [keys]
 leader = "ctrl+s"
-defaults = false               # start from an empty table, like disable_default_key_bindings
+defaults = true                # false starts from an empty table, like disable_default_key_bindings
 
 [keys.bind]
 "leader v" = "split-right"
