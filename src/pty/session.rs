@@ -1,10 +1,10 @@
 //! A child process on a pseudo-terminal, with one thread blocked on reads and
-//! one blocked on writes. Knows nothing about terminals or windows.
+//! one blocked on writes.
 
 use std::ffi::{CStr, OsString};
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -14,6 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+use super::process::{self, Process};
 
 /// Chunks the reader may queue before it blocks, which in turn blocks the
 /// child: backpressure instead of unbounded memory.
@@ -142,6 +144,11 @@ impl Pty {
             }
         }
         ReadStatus::More
+    }
+
+    /// The program in the foreground: the shell, or what it is running.
+    pub fn foreground(&self) -> Option<Process> {
+        process::foreground(self.master.as_fd())
     }
 
     pub fn resize(&self, size: WindowSize) -> io::Result<()> {
