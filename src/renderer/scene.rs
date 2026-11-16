@@ -6,7 +6,7 @@ use libghostty_vt::unicode;
 
 use super::atlas::{Atlas, Full, Glyph};
 use crate::font::{Face, Fonts, Metrics, Weight};
-use crate::terminal::{Cell, CellStyle, CursorShape, Frame, Grapheme};
+use crate::terminal::{Cell, CellStyle, Cursor, CursorShape, Frame, Grapheme};
 
 /// A solid rectangle, in pixels from the grid's top-left corner. The layout
 /// matches `RectInstance` in shaders.metal.
@@ -35,6 +35,8 @@ pub struct GlyphInstance {
 #[derive(Clone, Copy, Debug)]
 pub struct Overlay<'a> {
     pub focused: bool,
+    /// Copy mode's cursor, a block in place of the terminal's.
+    pub copy_cursor: Option<(u16, u16)>,
     /// Text the input method is composing, shown at the cursor.
     pub preedit: &'a str,
 }
@@ -147,7 +149,11 @@ impl Scene {
 
     fn build_overlay(&mut self, frame: &Frame, overlay: &Overlay<'_>, fonts: &Fonts, atlas: &mut Atlas) {
         let m = fonts.metrics();
-        let Some(cursor) = frame.cursor else { return };
+        let cursor = match overlay.copy_cursor {
+            Some((x, y)) => Some(Cursor { x, y, shape: CursorShape::Block, wide: false, color: None }),
+            None => frame.cursor,
+        };
+        let Some(cursor) = cursor else { return };
         let x = if cursor.wide { cursor.x.saturating_sub(1) } else { cursor.x };
         let (left, top) = (f32::from(x) * m.cell_width as f32, f32::from(cursor.y) * m.cell_height as f32);
         let (cw, ch, stroke) = (m.cell_width as f32, m.cell_height as f32, m.stroke as f32);
@@ -172,7 +178,8 @@ impl Scene {
         let under = frame.rows.get(usize::from(cursor.y)).and_then(|row| row.cells.get(usize::from(x)));
         let width = cw * if under.is_some_and(|c| c.style.wide) { 2.0 } else { 1.0 };
         let color = cursor.color.unwrap_or(frame.foreground);
-        let shape = if overlay.focused { cursor.shape } else { CursorShape::BlockHollow };
+        let shape =
+            if overlay.focused || overlay.copy_cursor.is_some() { cursor.shape } else { CursorShape::BlockHollow };
         match shape {
             CursorShape::Block => {
                 self.overlay_rects.push(rect(left, top, width, ch, color));
@@ -310,7 +317,7 @@ mod tests {
         )
     }
 
-    const FOCUSED: Overlay<'static> = Overlay { focused: true, preedit: "" };
+    const FOCUSED: Overlay<'static> = Overlay { focused: true, copy_cursor: None, preedit: "" };
 
     #[test]
     fn builds_one_glyph_per_inked_cell_and_merges_backgrounds() {
@@ -341,7 +348,7 @@ mod tests {
     #[test]
     fn preedit_replaces_the_cursor() {
         let (mut t, fonts, mut atlas, mut scene) = setup();
-        let overlay = Overlay { focused: true, preedit: "日本" };
+        let overlay = Overlay { focused: true, copy_cursor: None, preedit: "日本" };
         scene.build(&mut t.frame(), &overlay, &fonts, &mut atlas).expect("room");
         assert_eq!(scene.overlay_glyphs.len(), 2);
         // Two wide backgrounds and an underline.
