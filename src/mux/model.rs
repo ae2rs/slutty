@@ -13,7 +13,7 @@ use super::tree::{Axis, Direction, Layout, Rect};
 use super::window::{Tab, Window};
 use super::{PaneId, WindowId};
 use crate::config::Config;
-use crate::terminal::{Frame, Geometry};
+use crate::terminal::{Frame, Geometry, Notification};
 
 /// What changed since the last pump, for the windows to show.
 #[derive(Debug, Default)]
@@ -28,6 +28,7 @@ pub struct Pump {
     pub more: bool,
     /// Text a program put on the clipboard (OSC 52); the last one wins.
     pub clipboard: Option<String>,
+    pub notifications: Vec<(PaneId, Notification)>,
 }
 
 /// One tab as the tab bar shows it.
@@ -169,6 +170,21 @@ impl Mux {
         Some(self.adopt(size, removed?))
     }
 
+    /// Shows `pane`: its tab becomes active, and it the active pane, out of
+    /// a zoom that hid it. Returns its window.
+    pub fn reveal(&mut self, pane: PaneId) -> Option<WindowId> {
+        let (&window, w) = self.windows.iter().find(|(_, w)| w.position(pane).is_some())?;
+        let index = w.position(pane)?;
+        self.change_focus(window, |w| {
+            w.activate(index);
+            let tab = w.active_tab_mut();
+            tab.zoomed &= tab.active == pane;
+            tab.active = pane;
+        });
+        self.fit_tab(window, None);
+        Some(window)
+    }
+
     /// The directory of the window's active pane.
     pub fn active_cwd(&self, window: WindowId) -> Option<std::path::PathBuf> {
         self.cwd(self.active_pane(window)?)
@@ -301,6 +317,7 @@ impl Mux {
             if pumped.clipboard.is_some() {
                 pump.clipboard = pumped.clipboard;
             }
+            pump.notifications.extend(pumped.notifications.into_iter().map(|n| (id, n)));
             let Some((window, w)) = self.windows.iter().find(|(_, w)| w.position(id).is_some()) else { continue };
             if pumped.output && w.active_tab().tree.contains(id) {
                 pump.redraw.insert(*window);

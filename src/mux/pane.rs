@@ -12,7 +12,7 @@ use libghostty_vt::key::Mods;
 
 use crate::config::Config;
 use crate::pty::{Process, Pty, ReadStatus, Spawn, WindowSize};
-use crate::terminal::{Frame, Geometry, KeyInput, MouseInput, Terminal};
+use crate::terminal::{Frame, Geometry, KeyInput, MouseInput, Notification, Terminal};
 
 /// rho sets this user variable to `1` once it has printed its transcript
 /// onto the normal screen for copy mode, and back to `0` when it wipes it.
@@ -75,6 +75,7 @@ pub(super) struct Pumped {
     pub info_changed: bool,
     pub closed: bool,
     pub clipboard: Option<String>,
+    pub notifications: Vec<Notification>,
 }
 
 pub struct Pane {
@@ -132,6 +133,7 @@ impl Pane {
         }
         self.flush();
         pumped.clipboard = self.terminal.take_clipboard();
+        pumped.notifications = self.terminal.take_notifications();
         match status {
             ReadStatus::Drained => {}
             ReadStatus::More => pumped.more = true,
