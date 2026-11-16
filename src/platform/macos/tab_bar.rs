@@ -8,6 +8,7 @@ use libghostty_vt::color::Rgb;
 
 use crate::animation;
 use crate::config::{self, Stat, Theme};
+use crate::font::Metrics;
 use crate::mux::{RhoActivity, TabView};
 use crate::renderer::Line;
 use crate::status::{self, Ink, Stats};
@@ -109,15 +110,19 @@ pub struct Strip {
 }
 
 impl Strip {
-    /// One line per mark, then the stats, for a layer over the tab bar
-    /// `cell_width` pixels to a cell.
-    pub fn lines(&self, cell_width: f32) -> Vec<Line> {
+    /// One line per mark, then the stats, for a layer over the tab bar in
+    /// cells of `m`.
+    pub fn lines(&self, m: Metrics) -> Vec<Line> {
+        let cell_width = m.cell_width as f32;
         let mark = animation::SPINNER[self.frame % animation::SPINNER.len()];
+        // The spinner's dots fill the top three of the cell's four braille
+        // rows; an eighth of the cell down centers them, level with the title.
+        let drop = (m.cell_height / 8) as f32;
         let mut lines: Vec<Line> = self
             .spinners
             .iter()
             .map(|s| {
-                let mut line = Line::new(s.cell as f32 * cell_width, 0.0, cell_width, self.background);
+                let mut line = Line::new(s.cell as f32 * cell_width, drop, cell_width, self.background);
                 line.push_str(mark.encode_utf8(&mut [0; 4]), s.color, CellStyle::default());
                 line
             })
@@ -223,12 +228,13 @@ mod tests {
             status_end: 74,
             status: vec![("7%".into(), blue), (" |".into(), black)],
         };
-        let lines = strip.lines(10.0);
+        let m = Metrics { cell_width: 10, cell_height: 40, baseline: 30, underline_offset: 33, stroke: 2 };
+        let lines = strip.lines(m);
         assert_eq!(lines.len(), 2);
-        assert_eq!((lines[0].x, lines[0].width, lines[0].background), (30.0, 10.0, black));
+        assert_eq!((lines[0].x, lines[0].y, lines[0].width, lines[0].background), (30.0, 5.0, 10.0, black));
         assert_eq!(lines[0].cells[0].text, crate::terminal::Grapheme::Char(animation::SPINNER[2]));
         assert_eq!(lines[0].cells[0].fg, blue);
-        assert_eq!((lines[1].x, lines[1].width, lines[1].cells.len()), (700.0, 40.0, 4));
+        assert_eq!((lines[1].x, lines[1].y, lines[1].width, lines[1].cells.len()), (700.0, 0.0, 40.0, 4));
         assert_eq!((lines[1].cells[1].fg, lines[1].cells[3].fg), (blue, black));
     }
 

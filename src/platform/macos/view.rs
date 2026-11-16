@@ -733,7 +733,7 @@ impl TerminalView {
         surface.layer().setHidden(strip.is_none());
         CATransaction::commit();
         if let Some(strip) = &strip {
-            let lines = strip.lines(renderer.metrics().cell_width as f32);
+            let lines = strip.lines(renderer.metrics());
             renderer.render(surface, &mut [], &[], &lines, None, Shown::ALL);
             log::trace!("strip presented");
         }
