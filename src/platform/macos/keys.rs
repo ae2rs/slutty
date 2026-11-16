@@ -1,7 +1,10 @@
-//! macOS key codes and modifier flags in libghostty's terms.
+//! macOS key codes and modifier flags in libghostty's and the bindings'
+//! terms.
 
 use libghostty_vt::key::{Key, Mods};
 use objc2_app_kit::NSEventModifierFlags;
+
+use crate::keys::{KeyName, KeyPress, Modifiers};
 
 // Device-dependent bits of NSEventModifierFlags (IOKit's NX_DEVICE*KEYMASK)
 // that tell the right-hand modifier keys apart.
@@ -172,6 +175,63 @@ pub fn key(code: u16) -> Key {
 /// the private-use codes it gives function keys.
 pub fn is_text(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| !c.is_control() && !('\u{F700}'..='\u{F8FF}').contains(&c))
+}
+
+/// A key press as bindings see it. `unshifted` and `shifted` are what the
+/// key types with no modifiers and with shift alone. `None` for modifier
+/// keys, which bind to nothing.
+pub fn press(
+    code: u16,
+    flags: NSEventModifierFlags,
+    unshifted: Option<char>,
+    shifted: Option<char>,
+) -> Option<KeyPress> {
+    let mods = Modifiers {
+        cmd: flags.contains(NSEventModifierFlags::Command),
+        ctrl: flags.contains(NSEventModifierFlags::Control),
+        alt: flags.contains(NSEventModifierFlags::Option),
+        shift: flags.contains(NSEventModifierFlags::Shift),
+    };
+    let key = match key(code) {
+        Key::Enter | Key::NumpadEnter => KeyName::Enter,
+        Key::Escape => KeyName::Escape,
+        Key::Tab => KeyName::Tab,
+        Key::Backspace => KeyName::Backspace,
+        Key::Delete => KeyName::Delete,
+        Key::Insert => KeyName::Insert,
+        Key::ArrowUp => KeyName::Up,
+        Key::ArrowDown => KeyName::Down,
+        Key::ArrowLeft => KeyName::Left,
+        Key::ArrowRight => KeyName::Right,
+        Key::Home => KeyName::Home,
+        Key::End => KeyName::End,
+        Key::PageUp => KeyName::PageUp,
+        Key::PageDown => KeyName::PageDown,
+        Key::F1 => KeyName::F(1),
+        Key::F2 => KeyName::F(2),
+        Key::F3 => KeyName::F(3),
+        Key::F4 => KeyName::F(4),
+        Key::F5 => KeyName::F(5),
+        Key::F6 => KeyName::F(6),
+        Key::F7 => KeyName::F(7),
+        Key::F8 => KeyName::F(8),
+        Key::F9 => KeyName::F(9),
+        Key::F10 => KeyName::F(10),
+        Key::F11 => KeyName::F(11),
+        Key::F12 => KeyName::F(12),
+        Key::ShiftLeft
+        | Key::ShiftRight
+        | Key::ControlLeft
+        | Key::ControlRight
+        | Key::AltLeft
+        | Key::AltRight
+        | Key::MetaLeft
+        | Key::MetaRight
+        | Key::CapsLock
+        | Key::Fn => return None,
+        _ => KeyName::Char(unshifted.filter(|c| !c.is_control())?),
+    };
+    Some(KeyPress { mods, key, shifted: shifted.filter(|c| !c.is_control()) })
 }
 
 #[cfg(test)]
