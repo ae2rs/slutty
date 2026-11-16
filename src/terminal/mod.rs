@@ -4,4 +4,4 @@ mod emulator;
 mod frame;
 
 pub use emulator::{Geometry, KeyInput, MouseInput, Terminal};
-pub use frame::{Cell, CellStyle, CursorShape, Frame, Grapheme};
+pub use frame::{Cell, CellStyle, CursorShape, Frame, Grapheme, Row};

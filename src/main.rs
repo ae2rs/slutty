@@ -5,6 +5,7 @@ mod mux;
 mod platform;
 mod pty;
 mod renderer;
+mod scan;
 mod terminal;
 
 fn main() -> std::process::ExitCode {
