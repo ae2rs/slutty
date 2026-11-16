@@ -49,7 +49,7 @@ pub struct Phase {
     /// Blinking text is in its visible half.
     pub text: bool,
     /// Counts the stats' refreshes; a change asks for one.
-    pub status: u128,
+    pub status: u64,
 }
 
 /// Time for every animation, counted from one epoch so that zones in
@@ -70,7 +70,11 @@ impl Clock {
             cursor: live.cursor.is_none_or(|since| cursor_on(since, now)),
             text: !live.text || steps(self.epoch, now, TEXT_BLINK).is_multiple_of(2),
             status: live.status.map_or(0, |since| {
-                if now < since + STATUS_FIRST { 0 } else { 1 + steps(self.epoch, now, STATUS_REFRESH) }
+                if now < since + STATUS_FIRST {
+                    0
+                } else {
+                    u64::try_from(steps(self.epoch, now, STATUS_REFRESH)).unwrap_or(u64::MAX).saturating_add(1)
+                }
             }),
         }
     }

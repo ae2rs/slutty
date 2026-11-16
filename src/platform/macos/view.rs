@@ -68,7 +68,7 @@ pub struct Ivars {
     /// The tab bar shows system stats, as last drawn.
     shows_status: Cell<bool>,
     /// The stats refresh last made, from [`crate::animation::Phase::status`].
-    status_phase: Cell<u128>,
+    status_phase: Cell<u64>,
     link: OnceCell<Retained<CADisplayLink>>,
     layout: Cell<Layout>,
     /// Each tab's cells in the tab bar, for clicks.
@@ -1210,6 +1210,13 @@ fn string_of(object: &AnyObject) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ivars_fit_objc2s_alignment() {
+        // objc2 panics when the view class is made if its ivars align past 8
+        // bytes, as a `u128` does.
+        assert!(align_of::<Ivars>() <= 8);
+    }
 
     #[test]
     fn the_search_bar_names_its_mode() {
