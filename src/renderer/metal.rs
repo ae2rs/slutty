@@ -1,3 +1,5 @@
+use std::cell::RefMut;
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
@@ -14,9 +16,10 @@ use objc2_metal::{
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 
-use super::atlas::{ATLAS_SIZE, Atlas};
-use super::scene::{GlyphInstance, Line, Overlay, RectInstance, Scene};
+use super::atlas::{ATLAS_SIZE, Atlas, Full};
+use super::scene::{Chrome, GlyphInstance, Line, Overlay, RectInstance, Scene};
 use crate::font::{Fonts, Metrics};
+use crate::mux::PaneId;
 use crate::terminal::Frame;
 
 pub const PIXEL_FORMAT: MTLPixelFormat = MTLPixelFormat::BGRA8Unorm;
@@ -34,6 +37,7 @@ impl std::error::Error for RenderError {}
 
 /// Vertex uniforms; the layout matches `Uniforms` in shaders.metal.
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct Uniforms {
     viewport: [f32; 2],
     origin: [f32; 2],
@@ -41,6 +45,17 @@ struct Uniforms {
 
 type Device = ProtocolObject<dyn MTLDevice>;
 type Pipeline = Retained<ProtocolObject<dyn MTLRenderPipelineState>>;
+
+/// One pane to draw: its frame, where it goes, and what lies on top.
+pub struct PaneDraw<'a> {
+    pub id: PaneId,
+    pub frame: RefMut<'a, Frame>,
+    /// Top-left corner in device pixels.
+    pub origin: [f32; 2],
+    pub overlay: Overlay<'a>,
+    /// Shown darker, as panes without the keyboard are.
+    pub dim: bool,
+}
 
 pub struct Renderer {
     device: Retained<Device>,
@@ -50,7 +65,10 @@ pub struct Renderer {
     texture: Retained<ProtocolObject<dyn MTLTexture>>,
     fonts: Fonts,
     atlas: Atlas,
-    scene: Scene,
+    /// The panes drawn last time. Others are dropped and built from
+    /// scratch when they show again.
+    scenes: HashMap<PaneId, Scene>,
+    chrome: Chrome,
 }
 
 impl Renderer {
@@ -84,7 +102,8 @@ impl Renderer {
             texture,
             fonts,
             atlas: Atlas::default(),
-            scene: Scene::default(),
+            scenes: HashMap::new(),
+            chrome: Chrome::default(),
         })
     }
 
@@ -96,24 +115,25 @@ impl Renderer {
         self.fonts.metrics()
     }
 
-    /// Swaps the fonts, after a change of display scale.
+    /// Swaps the fonts, after a change of size or display scale.
     pub fn set_fonts(&mut self, fonts: Fonts) {
         self.fonts = fonts;
         self.atlas.reset();
-        self.scene.invalidate();
+        self.scenes.clear();
     }
 
-    /// Draws `frame` into `layer`, with the grid's top-left corner at
-    /// `origin` (device pixels), and the `chrome` lines over it.
-    pub fn render(
-        &mut self,
-        layer: &CAMetalLayer,
-        frame: &mut Frame,
-        overlay: &Overlay<'_>,
-        origin: [f32; 2],
-        chrome: &[Line],
-    ) {
-        self.scene.build(frame, overlay, chrome, &self.fonts, &mut self.atlas);
+    /// Draws the panes into `layer` over `clear`, and the `chrome` lines
+    /// over them.
+    pub fn render(&mut self, layer: &CAMetalLayer, panes: &mut [PaneDraw<'_>], chrome: &[Line], clear: Rgb) {
+        self.scenes.retain(|id, _| panes.iter().any(|p| p.id == *id));
+        if self.build(panes, chrome).is_err() {
+            log::info!("glyph atlas full; starting over");
+            self.atlas.reset();
+            self.scenes.values_mut().for_each(Scene::invalidate);
+            if self.build(panes, chrome).is_err() {
+                log::warn!("glyph atlas too small for one screen");
+            }
+        }
         self.upload_glyphs();
 
         let Some(drawable) = layer.nextDrawable() else {
@@ -122,11 +142,44 @@ impl Renderer {
         };
         let size = layer.drawableSize();
         let viewport = [size.width as f32, size.height as f32];
-        let grid = Uniforms { viewport, origin };
+        let m = self.fonts.metrics();
+        let dims: Vec<RectInstance> = panes
+            .iter()
+            .filter(|p| p.dim)
+            .map(|p| {
+                let (cols, rows) = (p.frame.cols, p.frame.rows.len());
+                let size = [f32::from(cols) * m.cell_width as f32, rows as f32 * m.cell_height as f32];
+                RectInstance::new(p.origin, size, DIM)
+            })
+            .collect();
+        let mut batches = Vec::new();
+        for pane in panes.iter() {
+            let Some(s) = self.scenes.get(&pane.id) else { continue };
+            let uniforms = Uniforms { viewport, origin: pane.origin };
+            batches.extend([
+                (uniforms, Batch::Rects(&s.rects)),
+                (uniforms, Batch::Glyphs(&s.glyphs)),
+                (uniforms, Batch::Rects(&s.overlay_rects)),
+                (uniforms, Batch::Glyphs(&s.overlay_glyphs)),
+            ]);
+        }
         let screen = Uniforms { viewport, origin: [0.0, 0.0] };
-        if let Err(e) = self.encode(&drawable, [&grid, &screen], frame.background) {
+        batches.extend([
+            (screen, Batch::Rects(&dims)),
+            (screen, Batch::Rects(&self.chrome.rects)),
+            (screen, Batch::Glyphs(&self.chrome.glyphs)),
+        ]);
+        if let Err(e) = self.encode(&drawable, &batches, clear) {
             log::error!("drawing failed: {e}");
         }
+    }
+
+    fn build(&mut self, panes: &mut [PaneDraw<'_>], chrome: &[Line]) -> Result<(), Full> {
+        for pane in panes {
+            let scene = self.scenes.entry(pane.id).or_default();
+            scene.build(&mut pane.frame, &pane.overlay, &self.fonts, &mut self.atlas)?;
+        }
+        self.chrome.build(chrome, &self.fonts, &mut self.atlas)
     }
 
     fn upload_glyphs(&mut self) {
@@ -145,12 +198,11 @@ impl Renderer {
         }
     }
 
-    /// Draws the scene: the grid batches with the first uniforms, the chrome
-    /// with the second.
+    /// Draws each batch with its uniforms, in order.
     fn encode(
         &self,
         drawable: &ProtocolObject<dyn CAMetalDrawable>,
-        [grid, screen]: [&Uniforms; 2],
+        batches: &[(Uniforms, Batch<'_>)],
         clear: Rgb,
     ) -> Result<(), RenderError> {
         let pass = MTLRenderPassDescriptor::new();
@@ -164,15 +216,6 @@ impl Renderer {
 
         let commands = self.queue.commandBuffer().ok_or_else(|| err("no command buffer"))?;
         let encoder = commands.renderCommandEncoderWithDescriptor(&pass).ok_or_else(|| err("no encoder"))?;
-        let s = &self.scene;
-        let batches = [
-            (grid, Batch::Rects(&s.rects)),
-            (grid, Batch::Glyphs(&s.glyphs)),
-            (grid, Batch::Rects(&s.overlay_rects)),
-            (grid, Batch::Glyphs(&s.overlay_glyphs)),
-            (screen, Batch::Rects(&s.chrome_rects)),
-            (screen, Batch::Glyphs(&s.chrome_glyphs)),
-        ];
         if let Some((buffer, layout)) = pack(&self.device, batches.iter().map(|(_, batch)| batch)) {
             // SAFETY: the uniforms outlive the calls, which copy them; every
             // offset and count describes instances inside `buffer`.
@@ -182,7 +225,6 @@ impl Renderer {
                     if count == 0 {
                         continue;
                     }
-                    let uniforms: &Uniforms = uniforms;
                     encoder.setVertexBytes_length_atIndex(NonNull::from(uniforms).cast(), size_of::<Uniforms>(), 0);
                     encoder.setRenderPipelineState(if glyphs { &self.glyph_pipeline } else { &self.rect_pipeline });
                     encoder.setVertexBuffer_offset_atIndex(Some(&buffer), offset, 1);
@@ -202,6 +244,9 @@ impl Renderer {
     }
 }
 
+/// Black at a fifth: WezTerm's inactive panes, at 0.8 brightness.
+const DIM: [u8; 4] = [0, 0, 0, 51];
+
 enum Batch<'a> {
     Rects(&'a [RectInstance]),
     Glyphs(&'a [GlyphInstance]),
@@ -210,9 +255,9 @@ enum Batch<'a> {
 /// Copies the batches into one buffer. Returns it with each batch's offset,
 /// instance count and kind (glyphs or rects).
 #[allow(clippy::type_complexity, reason = "a private tuple read right away")]
-fn pack<'a>(
+fn pack<'a, 'b: 'a>(
     device: &Device,
-    batches: impl Iterator<Item = &'a Batch<'a>>,
+    batches: impl Iterator<Item = &'a Batch<'b>>,
 ) -> Option<(Retained<ProtocolObject<dyn MTLBuffer>>, Vec<(usize, usize, bool)>)> {
     // Buffer offsets must be aligned; 256 suits every Apple GPU.
     const ALIGN: usize = 256;

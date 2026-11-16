@@ -74,9 +74,8 @@ struct RowCache {
     glyphs: Vec<GlyphInstance>,
 }
 
-/// Instances in draw order: `rects`, `glyphs`, then the overlay's rects and
-/// glyphs (cursor, preedit) on top, all relative to the grid. Chrome lines
-/// come last, relative to the drawable.
+/// One pane's instances in draw order: `rects`, `glyphs`, then the overlay's
+/// rects and glyphs (cursor, preedit) on top, relative to the pane.
 #[derive(Default)]
 pub struct Scene {
     rows: Vec<RowCache>,
@@ -85,8 +84,6 @@ pub struct Scene {
     pub glyphs: Vec<GlyphInstance>,
     pub overlay_rects: Vec<RectInstance>,
     pub overlay_glyphs: Vec<GlyphInstance>,
-    pub chrome_rects: Vec<RectInstance>,
-    pub chrome_glyphs: Vec<GlyphInstance>,
 }
 
 impl Scene {
@@ -95,26 +92,20 @@ impl Scene {
         self.rebuild_all = true;
     }
 
+    /// Fails when the atlas is full; the caller resets it, invalidates every
+    /// scene and builds again.
     pub fn build(
         &mut self,
         frame: &mut Frame,
         overlay: &Overlay<'_>,
-        chrome: &[Line],
         fonts: &Fonts,
         atlas: &mut Atlas,
-    ) {
+    ) -> Result<(), Full> {
         if self.rows.len() != frame.rows.len() {
             self.rows.resize_with(frame.rows.len(), RowCache::default);
             self.rebuild_all = true;
         }
-        if self.build_rows(frame, fonts, atlas).is_err() {
-            log::info!("glyph atlas full; starting over");
-            atlas.reset();
-            self.rebuild_all = true;
-            if self.build_rows(frame, fonts, atlas).is_err() {
-                log::warn!("glyph atlas too small for one screen");
-            }
-        }
+        self.build_rows(frame, fonts, atlas)?;
         self.rebuild_all = false;
 
         self.rects.clear();
@@ -126,28 +117,8 @@ impl Scene {
         self.overlay_rects.clear();
         self.overlay_glyphs.clear();
         self.build_overlay(frame, overlay, fonts, atlas);
-        self.build_chrome(chrome, fonts, atlas);
         frame.changed = false;
-    }
-
-    /// Chrome is a few lines, rebuilt whole each frame.
-    fn build_chrome(&mut self, lines: &[Line], fonts: &Fonts, atlas: &mut Atlas) {
-        let m = fonts.metrics();
-        self.chrome_rects.clear();
-        self.chrome_glyphs.clear();
-        for line in lines {
-            self.chrome_rects.push(rect(line.x, line.y, line.width, m.cell_height as f32, line.background));
-            for (x, cell) in line.cells.iter().enumerate() {
-                let left = line.x + x as f32 * m.cell_width as f32;
-                if let Some(bg) = cell.bg {
-                    push_bg(&mut self.chrome_rects, left, line.y, m, bg);
-                }
-                if let Ok(Some(glyph)) = glyph(atlas, fonts, cell) {
-                    self.chrome_glyphs.push(glyph_instance(glyph, left, line.y, cell.fg));
-                }
-                decorations(&mut self.chrome_rects, cell, left, line.y, m);
-            }
-        }
+        Ok(())
     }
 
     fn build_rows(&mut self, frame: &mut Frame, fonts: &Fonts, atlas: &mut Atlas) -> Result<(), Full> {
@@ -226,6 +197,36 @@ impl Scene {
     }
 }
 
+/// Lines outside the grid, relative to the drawable. A few lines, rebuilt
+/// whole each frame.
+#[derive(Default)]
+pub struct Chrome {
+    pub rects: Vec<RectInstance>,
+    pub glyphs: Vec<GlyphInstance>,
+}
+
+impl Chrome {
+    pub fn build(&mut self, lines: &[Line], fonts: &Fonts, atlas: &mut Atlas) -> Result<(), Full> {
+        let m = fonts.metrics();
+        self.rects.clear();
+        self.glyphs.clear();
+        for line in lines {
+            self.rects.push(rect(line.x, line.y, line.width, m.cell_height as f32, line.background));
+            for (x, cell) in line.cells.iter().enumerate() {
+                let left = line.x + x as f32 * m.cell_width as f32;
+                if let Some(bg) = cell.bg {
+                    push_bg(&mut self.rects, left, line.y, m, bg);
+                }
+                if let Some(glyph) = glyph(atlas, fonts, cell)? {
+                    self.glyphs.push(glyph_instance(glyph, left, line.y, cell.fg));
+                }
+                decorations(&mut self.rects, cell, left, line.y, m);
+            }
+        }
+        Ok(())
+    }
+}
+
 fn face(style: CellStyle) -> Face {
     let weight = if style.bold {
         Weight::Bold
@@ -278,6 +279,12 @@ fn decorations(rects: &mut Vec<RectInstance>, cell: &Cell, left: f32, top: f32, 
     }
 }
 
+impl RectInstance {
+    pub fn new(pos: [f32; 2], size: [f32; 2], color: [u8; 4]) -> Self {
+        Self { pos, size, color, pad: 0 }
+    }
+}
+
 fn rect(x: f32, y: f32, w: f32, h: f32, color: Rgb) -> RectInstance {
     RectInstance { pos: [x, y], size: [w, h], color: rgba(color), pad: 0 }
 }
@@ -293,18 +300,7 @@ mod tests {
     use crate::terminal::{Geometry, Terminal};
 
     fn setup() -> (Terminal, Fonts, Atlas, Scene) {
-        let geometry = Geometry {
-            cols: 10,
-            rows: 3,
-            cell_width: 19,
-            cell_height: 42,
-            width: 228,
-            height: 126,
-            padding_left: 19,
-            padding_top: 0,
-            padding_right: 19,
-            padding_bottom: 0,
-        };
+        let geometry = Geometry { cols: 10, rows: 3, cell_width: 19, cell_height: 42 };
         let terminal = Terminal::new(geometry, &Config::default()).expect("terminal");
         (
             terminal,
@@ -320,7 +316,7 @@ mod tests {
     fn builds_one_glyph_per_inked_cell_and_merges_backgrounds() {
         let (mut t, fonts, mut atlas, mut scene) = setup();
         t.write(b"a b\x1b[41m  \x1b[0m");
-        scene.build(&mut t.frame(), &FOCUSED, &[], &fonts, &mut atlas);
+        scene.build(&mut t.frame(), &FOCUSED, &fonts, &mut atlas).expect("room");
         assert_eq!(scene.glyphs.len(), 2);
         assert_eq!(scene.rects.len(), 1);
         assert_eq!(scene.rects[0].size[0], 2.0 * fonts.metrics().cell_width as f32);
@@ -331,13 +327,13 @@ mod tests {
     fn rebuilds_only_dirty_rows() {
         let (mut t, fonts, mut atlas, mut scene) = setup();
         t.write(b"one\r\ntwo");
-        scene.build(&mut t.frame(), &FOCUSED, &[], &fonts, &mut atlas);
+        scene.build(&mut t.frame(), &FOCUSED, &fonts, &mut atlas).expect("room");
         let glyphs = scene.glyphs.clone();
         // Nothing changed: the same instances come back.
-        scene.build(&mut t.frame(), &FOCUSED, &[], &fonts, &mut atlas);
+        scene.build(&mut t.frame(), &FOCUSED, &fonts, &mut atlas).expect("room");
         assert_eq!(scene.glyphs, glyphs);
         t.write(b"!");
-        scene.build(&mut t.frame(), &FOCUSED, &[], &fonts, &mut atlas);
+        scene.build(&mut t.frame(), &FOCUSED, &fonts, &mut atlas).expect("room");
         assert_eq!(scene.glyphs.len(), glyphs.len() + 1);
         assert_eq!(scene.glyphs[..3], glyphs[..3]);
     }
@@ -346,7 +342,7 @@ mod tests {
     fn preedit_replaces_the_cursor() {
         let (mut t, fonts, mut atlas, mut scene) = setup();
         let overlay = Overlay { focused: true, preedit: "日本" };
-        scene.build(&mut t.frame(), &overlay, &[], &fonts, &mut atlas);
+        scene.build(&mut t.frame(), &overlay, &fonts, &mut atlas).expect("room");
         assert_eq!(scene.overlay_glyphs.len(), 2);
         // Two wide backgrounds and an underline.
         assert_eq!(scene.overlay_rects.len(), 3);
@@ -355,15 +351,16 @@ mod tests {
 
     #[test]
     fn chrome_lines_sit_at_their_own_position() {
-        let (mut t, fonts, mut atlas, mut scene) = setup();
+        let (_, fonts, mut atlas, _) = setup();
         let white = Rgb { r: 255, g: 255, b: 255 };
         let mut line = Line::new(5.0, 7.0, 300.0, Rgb { r: 200, g: 0, b: 0 });
         line.push_str("a 日", white, CellStyle::default());
         assert_eq!(line.cells.len(), 4, "the wide character takes two cells");
-        scene.build(&mut t.frame(), &FOCUSED, &[line], &fonts, &mut atlas);
-        assert_eq!(scene.chrome_rects.len(), 1);
-        assert_eq!(scene.chrome_rects[0].pos, [5.0, 7.0]);
-        assert_eq!(scene.chrome_glyphs.len(), 2);
-        assert!(scene.chrome_glyphs[1].pos[0] > 5.0 + 2.0 * fonts.metrics().cell_width as f32 - 4.0);
+        let mut chrome = Chrome::default();
+        chrome.build(&[line], &fonts, &mut atlas).expect("room");
+        assert_eq!(chrome.rects.len(), 1);
+        assert_eq!(chrome.rects[0].pos, [5.0, 7.0]);
+        assert_eq!(chrome.glyphs.len(), 2);
+        assert!(chrome.glyphs[1].pos[0] > 5.0 + 2.0 * fonts.metrics().cell_width as f32 - 4.0);
     }
 }
