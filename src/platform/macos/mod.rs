@@ -3,5 +3,6 @@
 mod app;
 mod keys;
 mod view;
+mod watch;
 
 pub use app::run;
