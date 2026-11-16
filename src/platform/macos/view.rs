@@ -557,12 +557,7 @@ impl TerminalView {
                 if let Some(search) = &modes.search {
                     let [x, y] = cell(rect.x, rect.y + rect.rows.saturating_sub(1));
                     let mut line = Line::new(x, y, f32::from(rect.cols) * cw, rgb(theme.selection_bg));
-                    let count = match search.current {
-                        Some(current) => format!("{current}/{}", search.total),
-                        None => format!("{} found", search.total),
-                    };
-                    let text = format!(" Search: {}\u{2588}  {count}", search.needle);
-                    let text: String = text.chars().take(usize::from(rect.cols)).collect();
+                    let text: String = search_bar(search).chars().take(usize::from(rect.cols)).collect();
                     line.push_str(&text, rgb(theme.foreground), CellStyle::default());
                     chrome.push(line);
                 }
@@ -930,6 +925,18 @@ fn pane_mut(app: &mut App, pane: PaneId, f: impl FnOnce(&mut crate::mux::Pane)) 
     }
 }
 
+/// The search bar's text: the mode, the needle with a block for a cursor,
+/// then where search is.
+fn search_bar(search: &SearchStatus) -> String {
+    let mode = if search.regex { "Regex" } else { "Search" };
+    let count = match search.current {
+        _ if search.invalid => "invalid".to_owned(),
+        Some(current) => format!("{current}/{}", search.total),
+        None => format!("{} found", search.total),
+    };
+    format!(" {mode}: {}\u{2588}  {count}", search.needle)
+}
+
 /// A line across the top that says why the config file is not in effect.
 fn banner(error: &str, config: &Config, layout: Layout) -> Line {
     let theme = &config.theme;
@@ -965,5 +972,20 @@ fn string_of(object: &AnyObject) -> String {
         s.string().to_string()
     } else {
         String::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_search_bar_names_its_mode() {
+        let text = SearchStatus { needle: "ab".into(), current: Some(2), total: 5, regex: false, invalid: false };
+        assert_eq!(search_bar(&text), " Search: ab\u{2588}  2/5");
+        let regex = SearchStatus { needle: "a+".into(), regex: true, ..SearchStatus::default() };
+        assert_eq!(search_bar(&regex), " Regex: a+\u{2588}  0 found");
+        let invalid = SearchStatus { needle: "(".into(), regex: true, invalid: true, ..SearchStatus::default() };
+        assert_eq!(search_bar(&invalid), " Regex: (\u{2588}  invalid");
     }
 }
