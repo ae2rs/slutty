@@ -149,7 +149,6 @@ impl Frame {
                 self.changed = true;
             }
         }
-        drop(iteration);
         snapshot.clean()
     }
 }
