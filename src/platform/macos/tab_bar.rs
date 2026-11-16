@@ -96,14 +96,14 @@ pub fn build(
 }
 
 /// What the strip over the tab bar shows, on the tab bar's `background`: the
-/// working tabs' marks at `frame` of the spinner, and the system stats at the
-/// right end, from cell `status_cell`.
+/// working tabs' marks at `frame` of the spinner, and the system stats ending
+/// before cell `status_end`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Strip {
     pub spinners: Vec<Spinner>,
     pub background: Rgb,
     pub frame: usize,
-    pub status_cell: usize,
+    pub status_end: usize,
     pub status: Vec<(String, Rgb)>,
 }
 
@@ -122,11 +122,13 @@ impl Strip {
             })
             .collect();
         if !self.status.is_empty() {
-            let mut line = Line::new(self.status_cell as f32 * cell_width, 0.0, 0.0, self.background);
+            let mut line = Line::new(0.0, 0.0, 0.0, self.background);
             for (text, color) in &self.status {
                 line.push_str(text, *color, CellStyle::default());
             }
-            line.width = line.cells.len() as f32 * cell_width;
+            let cells = line.cells.len();
+            line.x = self.status_end.saturating_sub(cells) as f32 * cell_width;
+            line.width = cells as f32 * cell_width;
             lines.push(line);
         }
         lines
@@ -217,8 +219,8 @@ mod tests {
             spinners: vec![Spinner { cell: 3, color: blue }],
             background: black,
             frame: 12,
-            status_cell: 70,
-            status: vec![(" 7%".into(), blue), (" ".into(), black)],
+            status_end: 74,
+            status: vec![("7%".into(), blue), (" |".into(), black)],
         };
         let lines = strip.lines(10.0);
         assert_eq!(lines.len(), 2);

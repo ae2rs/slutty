@@ -86,10 +86,11 @@ pub enum Ink {
     Up,
 }
 
-/// `items` as text pieces, separated by `|` and padded by a space, as
-/// WezTerm's tabline lays them out. The width depends on `items` alone.
+/// `items` as text pieces, separated by ` | ` as WezTerm's tabline lays
+/// them out: `12.34 GB | 7% | ↓12K ↑900B | 61%`. The width varies with the
+/// values, up to [`width`].
 pub fn segments(items: &[Stat], stats: &Stats) -> Vec<(String, Ink)> {
-    let mut out = vec![(" ".to_owned(), Ink::Text)];
+    let mut out = Vec::new();
     for (i, item) in items.iter().enumerate() {
         if i > 0 {
             out.push((" | ".to_owned(), Ink::Text));
@@ -101,49 +102,46 @@ pub fn segments(items: &[Stat], stats: &Stats) -> Vec<(String, Ink)> {
                 let (rx, tx) = stats.net.map_or((None, None), |(rx, tx)| (Some(rx), Some(tx)));
                 out.extend([
                     ("↓".to_owned(), Ink::Down),
-                    (format!("{:>6} ", rate(rx)), Ink::Text),
+                    (format!("{} ", rate(rx)), Ink::Text),
                     ("↑".to_owned(), Ink::Up),
-                    (format!("{:>6}", rate(tx)), Ink::Text),
+                    (rate(tx), Ink::Text),
                 ]);
             }
             Stat::Disk => out.push((percent(stats.disk), Ink::Text)),
         }
     }
-    out.push((" ".to_owned(), Ink::Text));
     out
 }
 
-/// The cells `items` take.
+/// The most cells `items` can take, so the tabs can stop short of them
+/// whatever the values.
 pub fn width(items: &[Stat]) -> usize {
-    segments(items, &Stats::default()).iter().map(|(text, _)| text.chars().count()).sum()
+    let widest = Stats { ram: Some(u64::MAX), cpu: Some(100), net: Some((f64::MAX, f64::MAX)), disk: Some(100) };
+    segments(items, &widest).iter().map(|(text, _)| text.chars().count()).sum()
 }
 
-/// `12.34 GB`, eight cells.
+/// `12.34 GB`, at most eight cells.
 fn ram(bytes: Option<u64>) -> String {
-    let text = bytes.map_or_else(
-        || "--".to_owned(),
-        |b| {
-            let gb = (b as f64 / f64::from(1 << 30)).min(999.9);
-            if gb < 99.995 { format!("{gb:.2}") } else { format!("{gb:.1}") }
-        },
-    );
-    format!("{text:>5} GB")
+    let Some(b) = bytes else { return "-- GB".to_owned() };
+    let gb = (b as f64 / f64::from(1 << 30)).min(999.9);
+    if gb < 99.995 { format!("{gb:.2} GB") } else { format!("{gb:.1} GB") }
 }
 
-/// ` 7%`, four cells.
+/// `7%`, at most four cells.
 fn percent(value: Option<u8>) -> String {
-    format!("{:>3}%", value.map_or_else(|| "--".to_owned(), |v| v.min(100).to_string()))
+    format!("{}%", value.map_or_else(|| "--".to_owned(), |v| v.min(100).to_string()))
 }
 
-/// A rate in at most six cells: `999B`, `12K`, `1.5M`, `2.0G`.
+/// A rate in at most six cells: `999B`, `12K`, `1.5M`, `2.0G`. Each unit
+/// stops where rounding would take it to four digits.
 fn rate(bytes: Option<f64>) -> String {
     let Some(b) = bytes else { return "--".to_owned() };
     let (k, m, g) = (b / 1024.0, b / (1024.0 * 1024.0), b / (1024.0 * 1024.0 * 1024.0));
     if b < 1000.0 {
         format!("{}B", b.max(0.0) as u64)
-    } else if k < 1000.0 {
+    } else if k < 999.5 {
         format!("{k:.0}K")
-    } else if m < 1000.0 {
+    } else if m < 999.95 {
         format!("{m:.1}M")
     } else {
         format!("{:.1}G", g.min(999.9))
@@ -164,29 +162,36 @@ mod tests {
     #[test]
     fn reads_like_wezterm() {
         let stats = Stats { ram: Some(13_249_974_272), cpu: Some(7), net: Some((12_800.0, 900.0)), disk: Some(61) };
-        assert_eq!(text(&ALL, &stats), " 12.34 GB |   7% | ↓   12K ↑  900B |  61% ");
-        assert_eq!(text(&[Stat::Cpu], &Stats::default()), "  --% ");
+        assert_eq!(text(&ALL, &stats), "12.34 GB | 7% | ↓12K ↑900B | 61%");
+        assert_eq!(text(&[Stat::Cpu], &Stats::default()), "--%");
     }
 
     #[test]
-    fn the_width_never_changes_with_the_values() {
+    fn no_values_outgrow_the_width() {
         let extremes = [
             Stats::default(),
             Stats { ram: Some(0), cpu: Some(0), net: Some((0.0, 0.0)), disk: Some(0) },
             Stats { ram: Some(u64::MAX), cpu: Some(100), net: Some((1e15, 999.9)), disk: Some(100) },
             Stats { ram: Some(107_000_000_000), cpu: Some(55), net: Some((1_048_000.0, 1_023_999.0)), disk: Some(9) },
+            Stats {
+                ram: Some(107_369_000_000),
+                cpu: Some(99),
+                net: Some((1_048_575_000.0, 1_023_487.0)),
+                disk: Some(99),
+            },
         ];
         for stats in extremes {
-            assert_eq!(text(&ALL, &stats).chars().count(), width(&ALL), "{stats:?}");
+            assert!(text(&ALL, &stats).chars().count() <= width(&ALL), "{stats:?}");
         }
+        assert_eq!(width(&ALL), 8 + 4 + 15 + 4 + 3 * 3);
     }
 
     #[test]
     fn rates_pick_a_unit() {
         let r = |b: f64| rate(Some(b));
         assert_eq!(
-            (r(0.0), r(999.0), r(12_800.0), r(1_572_864.0), r(3e9)),
-            ("0B".into(), "999B".into(), "12K".into(), "1.5M".into(), "2.8G".into())
+            (r(0.0), r(999.0), r(12_800.0), r(1_023_600.0), r(1_572_864.0), r(3e9)),
+            ("0B".into(), "999B".into(), "12K".into(), "1.0M".into(), "1.5M".into(), "2.8G".into())
         );
     }
 

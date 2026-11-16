@@ -565,11 +565,13 @@ impl TerminalView {
             ivars.shows_status.set(shows_status);
             if layout.tab_bar {
                 let cols = (layout.width / m.cell_width) as usize;
-                let status_cell = cols.saturating_sub(if shows_status { status::width(items) } else { 0 });
+                let status_end = cols.saturating_sub(tab_bar::EDGE);
+                // Tabs stop a cell short of the widest the stats can get.
+                let tab_cols = if shows_status { status_end.saturating_sub(status::width(items) + 1) } else { cols };
                 let bar = tab_bar::build(
                     &mux.tabs(window),
                     &config.theme,
-                    status_cell,
+                    tab_cols,
                     config.tab_bar.max_width,
                     layout.width as f32,
                     focused,
@@ -584,7 +586,7 @@ impl TerminalView {
                         Vec::new()
                     };
                     let background = bar.line.background;
-                    strip = Some(Strip { spinners: bar.spinners, background, frame, status_cell, status });
+                    strip = Some(Strip { spinners: bar.spinners, background, frame, status_end, status });
                 }
                 chrome.push(bar.line);
             }
