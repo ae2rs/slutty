@@ -68,6 +68,12 @@ pub struct Metrics {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FontId(u32);
 
+impl FontId {
+    /// Braille, drawn by [`raster::braille`] rather than a font. Its glyph
+    /// is the pattern: the codepoint less U+2800.
+    const BRAILLE: Self = Self(u32::MAX);
+}
+
 /// A glyph placed by shaping.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Shaped {
@@ -173,7 +179,10 @@ impl Fonts {
             .into_iter()
             .flat_map(|run| {
                 let font = self.intern(run.font);
-                run.glyphs.into_iter().map(move |g| Shaped { byte: g.byte, font, glyph: g.glyph, x: g.x as f32 })
+                run.glyphs.into_iter().map(move |g| {
+                    let (font, glyph) = braille(text, g.byte).map_or((font, g.glyph), |dots| (FontId::BRAILLE, dots));
+                    Shaped { byte: g.byte, font, glyph, x: g.x as f32 }
+                })
             })
             .collect();
         let mut cache = self.shaped.borrow_mut();
@@ -188,6 +197,9 @@ impl Fonts {
     /// Draws glyph `glyph` of `font`, with its offset from the pen at the
     /// cell's top. `None` for a glyph with no ink, such as a space.
     pub fn rasterize(&self, font: FontId, glyph: u16) -> Option<Bitmap> {
+        if font == FontId::BRAILLE {
+            return raster::braille(u8::try_from(glyph).ok()?, self.metrics);
+        }
         let fonts = self.fonts.borrow();
         let font = fonts.get(font.0 as usize)?;
         raster::draw(font, glyph, self.metrics, &self.color_space)
@@ -204,6 +216,12 @@ impl Fonts {
             FontId(fonts.len() as u32 - 1)
         })
     }
+}
+
+/// The braille pattern of the character at `byte` of `text`, if it is one.
+fn braille(text: &str, byte: usize) -> Option<u16> {
+    let c = text.get(byte..)?.chars().next()?;
+    u16::try_from(u32::from(c).checked_sub(0x2800)?).ok().filter(|&dots| dots <= 0xff)
 }
 
 fn face_index(face: Face) -> usize {
@@ -389,6 +407,18 @@ mod tests {
         let m = fonts(&Font::default()).metrics();
         assert!((15..=25).contains(&m.cell_width), "{m:?}");
         assert!(m.cell_height > m.cell_width && m.baseline < m.cell_height, "{m:?}");
+    }
+
+    #[test]
+    fn braille_is_drawn_to_fill_the_cell() {
+        let fonts = fonts(&Font::default());
+        let face = Face { weight: Weight::Regular, italic: false };
+        let shaped = fonts.shape("a⠋", face);
+        assert_eq!((shaped[1].font, shaped[1].glyph), (FontId::BRAILLE, 0x0b));
+        assert_ne!(shaped[0].font, FontId::BRAILLE);
+        let full = draw(&fonts, "⣿", face).expect("ink");
+        let m = fonts.metrics();
+        assert!(full.height * 4 >= m.cell_height * 3, "{}px of a {}px cell", full.height, m.cell_height);
     }
 
     #[test]
