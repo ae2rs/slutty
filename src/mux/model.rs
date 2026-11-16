@@ -134,6 +134,46 @@ impl Mux {
         }
     }
 
+    /// Moves the active pane into a new window of the same size, or its tab
+    /// when it is the tab's only pane. Returns the new window; `None` when
+    /// the pane is alone in its window.
+    pub fn pop_pane(&mut self, window: WindowId) -> Option<WindowId> {
+        let w = self.windows.get(&window)?;
+        let (index, pane, size) = (w.active(), w.active_tab().active, w.size);
+        let mut detached = false;
+        self.change_focus(window, |w| {
+            let tab = w.tab_mut(index);
+            if let Some(next) = tab.tree.remove(pane) {
+                detached = true;
+                tab.zoomed = false;
+                tab.active = next;
+            }
+        });
+        if !detached {
+            return self.pop_tab(window);
+        }
+        self.fit_tab(window, Some(index));
+        Some(self.adopt(size, Tab::new(pane)))
+    }
+
+    /// Moves the active tab into a new window of the same size. Returns the
+    /// new window; `None` when the tab is alone in its window.
+    pub fn pop_tab(&mut self, window: WindowId) -> Option<WindowId> {
+        let w = self.windows.get(&window)?;
+        if w.tabs().len() < 2 {
+            return None;
+        }
+        let (index, size) = (w.active(), w.size);
+        let mut removed = None;
+        self.change_focus(window, |w| removed = Some(w.remove(index).0));
+        Some(self.adopt(size, removed?))
+    }
+
+    /// The directory of the window's active pane.
+    pub fn active_cwd(&self, window: WindowId) -> Option<std::path::PathBuf> {
+        self.cwd(self.active_pane(window)?)
+    }
+
     /// Makes `pane` active, if it is in the window's active tab.
     pub fn activate_pane(&mut self, window: WindowId, pane: PaneId) {
         self.change_focus(window, |w| {
@@ -347,6 +387,14 @@ impl Mux {
 
     fn cwd(&self, pane: PaneId) -> Option<std::path::PathBuf> {
         self.panes.get(&pane).and_then(|p| p.info().cwd.clone())
+    }
+
+    /// A new window holding `tab`.
+    fn adopt(&mut self, size: Geometry, tab: Tab) -> WindowId {
+        let id = WindowId(self.next_id());
+        self.windows.insert(id, Window::new(tab, size));
+        self.fit_tab(id, None);
+        id
     }
 
     fn spawn(&mut self, size: Geometry, config: &Config, cwd: Option<&Path>) -> io::Result<PaneId> {
