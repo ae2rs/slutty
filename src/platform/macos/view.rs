@@ -44,6 +44,8 @@ pub struct Ivars {
     layout: Cell<Layout>,
     /// Each tab's cells in the tab bar, for clicks.
     tab_cells: RefCell<Vec<Range<usize>>>,
+    /// The tab under the pointer.
+    hover_tab: Cell<Option<usize>>,
     focused: Cell<bool>,
     /// Text the input method is composing.
     marked: RefCell<String>,
@@ -181,6 +183,7 @@ define_class!(
         #[unsafe(method(mouseExited:))]
         fn mouse_exited(&self, _event: &NSEvent) {
             self.set_hover(None);
+            self.set_hover_tab(None);
         }
 
         #[unsafe(method(rightMouseDown:))]
@@ -363,6 +366,7 @@ impl TerminalView {
             link: OnceCell::new(),
             layout: Cell::new(layout),
             tab_cells: RefCell::new(Vec::new()),
+            hover_tab: Cell::new(None),
             focused: Cell::new(false),
             marked: RefCell::new(String::new()),
             key_texts: RefCell::new(None),
@@ -489,6 +493,7 @@ impl TerminalView {
                     config.tab_bar.max_width,
                     layout.width as f32,
                     focused,
+                    ivars.hover_tab.get(),
                 );
                 *ivars.tab_cells.borrow_mut() = bar.tabs;
                 chrome.push(bar.line);
@@ -662,15 +667,26 @@ impl TerminalView {
     /// Activates the tab under a click in the tab bar. Returns whether the
     /// click was in the tab bar.
     pub(super) fn click_tab_bar(&self, event: &NSEvent) -> bool {
-        let [x, y] = self.pixel_point(event);
-        let Some(cell) = self.ivars().layout.get().tab_bar_cell(x, y) else { return false };
-        let tab = self.ivars().tab_cells.borrow().iter().position(|cells| cells.contains(&cell));
+        let Some(tab) = self.tab_at(self.pixel_point(event)) else { return false };
         if let Some(tab) = tab {
             let window = self.ivars().window;
             with_app(|app| app.mux.activate_tab(window, tab));
             self.tabs_changed();
         }
         true
+    }
+
+    /// The tab under a point, or `None` outside the tab bar.
+    pub(super) fn tab_at(&self, [x, y]: [f64; 2]) -> Option<Option<usize>> {
+        let cell = self.ivars().layout.get().tab_bar_cell(x, y)?;
+        Some(self.ivars().tab_cells.borrow().iter().position(|cells| cells.contains(&cell)))
+    }
+
+    pub(super) fn set_hover_tab(&self, tab: Option<usize>) {
+        if self.ivars().hover_tab.replace(tab) != tab {
+            self.ivars().overlay_dirty.set(true);
+            self.request_frame();
+        }
     }
 
     fn key_equivalent(&self, event: &NSEvent) -> bool {

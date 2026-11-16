@@ -91,11 +91,13 @@ impl TerminalView {
         self.ivars().mouse_pane.set(None);
     }
 
-    /// Shows whether a link is under the pointer, and tells a program that
-    /// tracks all motion.
+    /// Shows whether a link or a tab is under the pointer, and tells a
+    /// program that tracks all motion.
     pub(super) fn pointer_moved(&self, event: &NSEvent) {
         self.send_mouse(event, mouse::Action::Motion, None);
-        let hover = self.link_at(self.pixel_point(event));
+        let point = self.pixel_point(event);
+        self.set_hover_tab(self.tab_at(point).flatten());
+        let hover = self.link_at(point);
         let cursor = if hover.is_some() { NSCursor::pointingHandCursor() } else { NSCursor::IBeamCursor() };
         cursor.set();
         self.set_hover(hover);

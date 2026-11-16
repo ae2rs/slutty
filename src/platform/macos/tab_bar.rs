@@ -23,7 +23,16 @@ pub struct TabBar {
 /// Lays out `tabs` across `cols` cells. Each reads `✦ 2 dir `: rho's mark,
 /// the index, then the active pane's directory. Without `focused`, the bar
 /// greys out as WezTerm's `window_frame` does; rho's marks keep their colors.
-pub fn build(tabs: &[TabView<'_>], theme: &Theme, cols: usize, max_width: u16, width: f32, focused: bool) -> TabBar {
+/// An inactive tab under the pointer (`hover`) turns aqua.
+pub fn build(
+    tabs: &[TabView<'_>],
+    theme: &Theme,
+    cols: usize,
+    max_width: u16,
+    width: f32,
+    focused: bool,
+    hover: Option<usize>,
+) -> TabBar {
     let rgb = |[r, g, b]: config::Rgb| Rgb { r, g, b };
     let background = if focused { theme.background } else { theme.inactive_titlebar_bg };
     let mut line = Line::new(0.0, 0.0, width, rgb(background));
@@ -51,6 +60,7 @@ pub fn build(tabs: &[TabView<'_>], theme: &Theme, cols: usize, max_width: u16, w
         let fg = match (focused, tab.active) {
             (false, _) => theme.inactive_titlebar_fg,
             (true, true) => theme.ansi[3],
+            (true, false) if hover == Some(i) => theme.ansi[6],
             (true, false) => theme.foreground,
         };
         line.push_str(&text, rgb(fg), CellStyle::default());
@@ -94,7 +104,7 @@ mod tests {
         let home = PaneInfo { cwd: Some("/Users/me".into()), ..PaneInfo::default() };
         let long = PaneInfo { cwd: Some("/src/a-very-long-name".into()), ..PaneInfo::default() };
         let tabs = [TabView { active: false, info: &home }, TabView { active: true, info: &long }];
-        let bar = build(&tabs, &Theme::default(), 80, 32, 800.0, true);
+        let bar = build(&tabs, &Theme::default(), 80, 32, 800.0, true, None);
         assert_eq!(text(&bar), "   1 me    2 a-very-lo…  ");
         assert_eq!(bar.tabs, vec![0..8, 9..24]);
         assert_eq!(bar.line.cells[10].fg, bar.line.cells[11].fg);
@@ -104,7 +114,7 @@ mod tests {
     #[test]
     fn rho_marks_its_tab() {
         let rho = PaneInfo { cwd: Some("/a".into()), rho: Some(RhoActivity::Question), ..PaneInfo::default() };
-        let bar = build(&[TabView { active: true, info: &rho }], &Theme::default(), 80, 32, 800.0, true);
+        let bar = build(&[TabView { active: true, info: &rho }], &Theme::default(), 80, 32, 800.0, true, None);
         assert_eq!(text(&bar), " ? 1 a  ");
         let [r, g, b] = Theme::default().ansi[4];
         assert_eq!(bar.line.cells[1].fg, Rgb { r, g, b }, "the mark has its own color");
@@ -115,7 +125,7 @@ mod tests {
     fn tabs_that_do_not_fit_are_left_out() {
         let root = PaneInfo { cwd: Some("/".into()), ..PaneInfo::default() };
         let tabs = [TabView { active: true, info: &root }, TabView { active: false, info: &root }];
-        let bar = build(&tabs, &Theme::default(), 10, 32, 100.0, true);
+        let bar = build(&tabs, &Theme::default(), 10, 32, 100.0, true, None);
         assert_eq!(text(&bar), "   1 /  ");
         assert_eq!(bar.tabs.len(), 1);
     }
@@ -126,7 +136,7 @@ mod tests {
         let plain = PaneInfo { cwd: Some("/b".into()), ..PaneInfo::default() };
         let tabs = [TabView { active: true, info: &rho }, TabView { active: false, info: &plain }];
         let theme = Theme::default();
-        let bar = build(&tabs, &theme, 80, 32, 800.0, false);
+        let bar = build(&tabs, &theme, 80, 32, 800.0, false, None);
         let rgb = |[r, g, b]: config::Rgb| Rgb { r, g, b };
         assert_eq!(bar.line.background, rgb(theme.inactive_titlebar_bg));
         assert_eq!(text(&bar), " ✕ 1 a    2 b  ");
@@ -134,5 +144,18 @@ mod tests {
         for i in [3, 5, 10, 12] {
             assert_eq!(bar.line.cells[i].fg, rgb(theme.inactive_titlebar_fg), "cell {i}");
         }
+    }
+
+    #[test]
+    fn a_hovered_inactive_tab_turns_aqua() {
+        let a = PaneInfo { cwd: Some("/a".into()), ..PaneInfo::default() };
+        let tabs = [TabView { active: true, info: &a }, TabView { active: false, info: &a }];
+        let theme = Theme::default();
+        let rgb = |[r, g, b]: config::Rgb| Rgb { r, g, b };
+        let bar = build(&tabs, &theme, 80, 32, 800.0, true, Some(1));
+        assert_eq!(bar.line.cells[10].fg, rgb(theme.ansi[6]));
+        let bar = build(&tabs, &theme, 80, 32, 800.0, true, Some(0));
+        assert_eq!(bar.line.cells[3].fg, rgb(theme.ansi[3]), "the active tab stays yellow");
+        assert_eq!(bar.line.cells[10].fg, rgb(theme.foreground));
     }
 }
