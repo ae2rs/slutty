@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use libghostty_vt::color::{Palette, Rgb};
 use libghostty_vt::effect::{
-    ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType, PrimaryDeviceAttributes,
-    SecondaryDeviceAttributes,
+    ClipboardWriteError, ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType,
+    PrimaryDeviceAttributes, SecondaryDeviceAttributes,
 };
 use libghostty_vt::error::Result;
 use libghostty_vt::key::{self, Key, Mods, OptionAsAlt};
@@ -18,7 +18,9 @@ use libghostty_vt::report::{ColorScheme, SizeReportSize};
 use libghostty_vt::terminal::{CursorStyle, ScrollViewport};
 use libghostty_vt::{Error, RenderState, focus, paste};
 
-use super::frame::{Frame, Iterators};
+use super::copy_mode::CopyMode;
+use super::frame::{Frame, Iterators, SelectionColors};
+use super::select::{Searching, Selector};
 use crate::config::{self, Config};
 
 /// A program that holds the screen longer than this (synchronized output)
@@ -69,23 +71,31 @@ pub struct MouseInput {
 
 /// State the libghostty callbacks share with us. Callbacks run inside
 /// `vt_write`, on this thread.
-struct Shared {
+pub(super) struct Shared {
     render_state: RefCell<RenderState<'static>>,
     iterators: RefCell<Iterators>,
-    frame: RefCell<Frame>,
+    pub frame: RefCell<Frame>,
     held_since: Cell<Option<Instant>>,
     replies: RefCell<Vec<u8>>,
     title_changed: Cell<bool>,
     pwd_changed: Cell<bool>,
-    geometry: Cell<Geometry>,
+    pub geometry: Cell<Geometry>,
+    /// Something libghostty does not report as damage changed, such as the
+    /// selection: copy every row on the next capture.
+    pub full_redraw: Cell<bool>,
+    selection_colors: Cell<SelectionColors>,
+    /// Text the program asked to put on the clipboard (OSC 52).
+    clipboard: RefCell<Option<String>>,
 }
 
 impl Shared {
     fn capture(&self, vt: &libghostty_vt::Terminal<'static, 'static>) {
         let mut state = self.render_state.borrow_mut();
-        let result = state
-            .update(vt)
-            .and_then(|snapshot| self.frame.borrow_mut().capture(&snapshot, &mut self.iterators.borrow_mut()));
+        let full = self.full_redraw.replace(false);
+        let colors = self.selection_colors.get();
+        let result = state.update(vt).and_then(|snapshot| {
+            self.frame.borrow_mut().capture(&snapshot, &mut self.iterators.borrow_mut(), colors, full)
+        });
         if let Err(err) = result {
             log::error!("capturing the screen failed: {err}");
         }
@@ -94,8 +104,11 @@ impl Shared {
 
 /// One libghostty terminal: bytes in, frames and replies out.
 pub struct Terminal {
-    vt: libghostty_vt::Terminal<'static, 'static>,
-    shared: Rc<Shared>,
+    pub(super) vt: libghostty_vt::Terminal<'static, 'static>,
+    pub(super) shared: Rc<Shared>,
+    pub(super) selector: Selector,
+    pub(super) copy: Option<CopyMode>,
+    pub(super) searching: Option<Searching>,
     key_encoder: key::Encoder<'static>,
     key_event: key::Event<'static>,
     mouse_encoder: mouse::Encoder<'static>,
@@ -116,6 +129,9 @@ impl Terminal {
             title_changed: Cell::new(false),
             pwd_changed: Cell::new(false),
             geometry: Cell::new(geometry),
+            full_redraw: Cell::new(false),
+            clipboard: RefCell::new(None),
+            selection_colors: Cell::new(SelectionColors::new(&config.theme)),
         });
 
         vt.resize(geometry.cols, geometry.rows, geometry.cell_width, geometry.cell_height)?;
@@ -157,6 +173,22 @@ impl Terminal {
                 }
             }
         })?
+        .on_clipboard_write({
+            let shared = Rc::clone(&shared);
+            move |_, write| {
+                // OSC 52 carries one text part; prefer text if there are more.
+                let mut contents = write.contents();
+                let first = contents.clone().next();
+                let text = contents.find(|c| c.mime.starts_with(b"text/")).or(first).map(|c| c.data.to_vec());
+                match text {
+                    Some(text) => {
+                        *shared.clipboard.borrow_mut() = Some(String::from_utf8_lossy(&text).into_owned());
+                        write.reply(Ok(()), false);
+                    }
+                    None => write.reply(Err(ClipboardWriteError::Unsupported), false),
+                }
+            }
+        })?
         .on_device_attributes(|_| Some(device_attributes()))?
         .on_xtversion(|_| Some(concat!("slutty ", env!("CARGO_PKG_VERSION"))))?
         .on_color_scheme(|_| Some(ColorScheme::Dark))?;
@@ -164,6 +196,9 @@ impl Terminal {
         let mut terminal = Self {
             vt,
             shared,
+            selector: Selector::new()?,
+            copy: None,
+            searching: None,
             key_encoder: key::Encoder::new()?,
             key_event: key::Event::new()?,
             mouse_encoder: mouse::Encoder::new()?,
@@ -188,6 +223,8 @@ impl Terminal {
             .set_default_cursor_style(Some(cursor_style(config.terminal.cursor)))?
             .set_default_cursor_blink(Some(false))?
             .set_default_color_palette(Some(xterm_palette(&theme.ansi)))?;
+        self.shared.selection_colors.set(SelectionColors::new(theme));
+        self.shared.full_redraw.set(true);
         self.option_as_alt = match config.terminal.option_as_alt {
             config::OptionAsAlt::None => OptionAsAlt::False,
             config::OptionAsAlt::Left => OptionAsAlt::Left,
@@ -206,6 +243,11 @@ impl Terminal {
     /// Feeds program output in.
     pub fn write(&mut self, data: &[u8]) {
         self.vt.vt_write(data);
+    }
+
+    /// Text the program last put on the clipboard, once.
+    pub fn take_clipboard(&self) -> Option<String> {
+        self.shared.clipboard.borrow_mut().take()
     }
 
     /// Bytes for the program: replies to its queries and encoded input.

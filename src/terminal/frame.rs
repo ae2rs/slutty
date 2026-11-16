@@ -88,6 +88,20 @@ impl Default for Frame {
     }
 }
 
+/// How selected cells look.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelectionColors {
+    pub fg: Rgb,
+    pub bg: Rgb,
+}
+
+impl SelectionColors {
+    pub fn new(theme: &crate::config::Theme) -> Self {
+        let rgb = |[r, g, b]: crate::config::Rgb| Rgb { r, g, b };
+        Self { fg: rgb(theme.selection_fg), bg: rgb(theme.selection_bg) }
+    }
+}
+
 /// Reusable libghostty iterators, so a capture allocates nothing on their side.
 pub(super) struct Iterators {
     rows: RowIterator<'static>,
@@ -107,11 +121,13 @@ impl Frame {
         &mut self,
         snapshot: &Snapshot<'static, '_>,
         it: &mut Iterators,
+        selection: SelectionColors,
+        full: bool,
     ) -> libghostty_vt::error::Result<()> {
         let colors = snapshot.colors()?;
         let cols = snapshot.cols()?;
         let rows = usize::from(snapshot.rows()?);
-        let mut dirty = snapshot.dirty()?;
+        let mut dirty = if full { Dirty::Full } else { snapshot.dirty()? };
         if cols != self.cols
             || rows != self.rows.len()
             || colors.background != self.background
@@ -136,7 +152,7 @@ impl Frame {
             Dirty::Partial => {
                 while let Some((y, row)) = iteration.next_dirty() {
                     if let Some(target) = self.rows.get_mut(usize::from(y)) {
-                        copy_row(row, target, &colors, &mut it.cells, &mut it.text)?;
+                        copy_row(row, target, &colors, selection, &mut it.cells, &mut it.text)?;
                         self.changed = true;
                     }
                 }
@@ -144,7 +160,7 @@ impl Frame {
             Dirty::Full => {
                 for target in &mut self.rows {
                     let Some(row) = iteration.next() else { break };
-                    copy_row(row, target, &colors, &mut it.cells, &mut it.text)?;
+                    copy_row(row, target, &colors, selection, &mut it.cells, &mut it.text)?;
                 }
                 self.changed = true;
             }
@@ -157,11 +173,13 @@ fn copy_row(
     row: &RowIteration<'static, '_>,
     target: &mut Row,
     colors: &Colors,
+    selection: SelectionColors,
     cells: &mut CellIterator<'static>,
     text: &mut String,
 ) -> libghostty_vt::error::Result<()> {
     target.cells.clear();
     target.dirty = true;
+    let selected = row.selection()?.map(|s| usize::from(s.start_x)..=usize::from(s.end_x));
     let mut iteration = cells.update(row)?;
     while let Some(cell) = iteration.next() {
         let wide = cell.raw_cell()?.wide()?;
@@ -182,6 +200,10 @@ fn copy_row(
                 fg = bg.unwrap_or(colors.background);
                 bg = Some(old_fg);
             }
+        }
+        if selected.as_ref().is_some_and(|range| range.contains(&target.cells.len())) {
+            fg = selection.fg;
+            bg = Some(selection.bg);
         }
         text.clear();
         if visible && cell.graphemes_len()? > 0 {
