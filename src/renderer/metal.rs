@@ -202,6 +202,8 @@ impl Renderer {
             batches.extend([
                 (uniforms, Batch::Rects(&s.rects)),
                 (uniforms, Batch::Glyphs(&s.glyphs)),
+                (uniforms, Batch::Rects(&s.blink_rects)),
+                (uniforms, Batch::Glyphs(&s.blink_glyphs)),
                 (uniforms, Batch::Rects(&s.overlay_rects)),
                 (uniforms, Batch::Glyphs(&s.overlay_glyphs)),
             ]);

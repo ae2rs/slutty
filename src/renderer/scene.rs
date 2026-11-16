@@ -79,11 +79,15 @@ fn text_cells(text: &str, fg: Rgb, style: CellStyle) -> impl Iterator<Item = Cel
 struct RowCache {
     rects: Vec<RectInstance>,
     glyphs: Vec<GlyphInstance>,
+    blink_rects: Vec<RectInstance>,
+    blink_glyphs: Vec<GlyphInstance>,
 }
 
 /// One pane's instances in draw order: `rects` (the pane's background
-/// first), `glyphs`, then the overlay's rects and glyphs (cursor, preedit) on
-/// top, relative to the pane.
+/// first), `glyphs`, the blinking cells' decorations and glyphs, then the
+/// overlay's rects and glyphs (cursor, preedit) on top, relative to the pane.
+/// Blinking cells and the overlay have batches of their own, so they can be
+/// left out of a frame without building it again.
 #[derive(Default)]
 pub struct Scene {
     rows: Vec<RowCache>,
@@ -92,6 +96,8 @@ pub struct Scene {
     split: Option<(u16, u16)>,
     pub rects: Vec<RectInstance>,
     pub glyphs: Vec<GlyphInstance>,
+    pub blink_rects: Vec<RectInstance>,
+    pub blink_glyphs: Vec<GlyphInstance>,
     pub overlay_rects: Vec<RectInstance>,
     pub overlay_glyphs: Vec<GlyphInstance>,
 }
@@ -130,6 +136,8 @@ impl Scene {
 
         self.rects.clear();
         self.glyphs.clear();
+        self.blink_rects.clear();
+        self.blink_glyphs.clear();
         // The pane's own background, so its tint covers the empty cells too.
         let m = fonts.metrics();
         let size = [f32::from(frame.cols) * m.cell_width as f32, frame.rows.len() as f32 * m.cell_height as f32];
@@ -137,6 +145,8 @@ impl Scene {
         for row in &self.rows {
             self.rects.extend_from_slice(&row.rects);
             self.glyphs.extend_from_slice(&row.glyphs);
+            self.blink_rects.extend_from_slice(&row.blink_rects);
+            self.blink_glyphs.extend_from_slice(&row.blink_glyphs);
         }
         self.overlay_rects.clear();
         self.overlay_glyphs.clear();
@@ -159,16 +169,21 @@ impl Scene {
             }
             cache.rects.clear();
             cache.glyphs.clear();
+            cache.blink_rects.clear();
+            cache.blink_glyphs.clear();
             let top = y as f32 * m.cell_height as f32;
             for (x, cell) in row.cells.iter().enumerate() {
                 let left = x as f32 * m.cell_width as f32;
                 if let Some(bg) = cell.bg.filter(|bg| *bg != frame.background) {
                     push_bg(&mut cache.rects, left, top, m, bg);
                 }
-                decorations(&mut cache.rects, cell, left, top, m);
+                let rects = if cell.style.blink { &mut cache.blink_rects } else { &mut cache.rects };
+                decorations(rects, cell, left, top, m);
             }
             let split = split.filter(|&(_, cy)| usize::from(cy) == y).map(|(x, _)| usize::from(x));
-            push_text(&mut cache.glyphs, &row.cells, [0.0, top], split, None, fonts, atlas)?;
+            let (glyphs, blink) = (&mut cache.glyphs, &mut cache.blink_glyphs);
+            let mut out = |cell: &Cell, g| if cell.style.blink { blink.push(g) } else { glyphs.push(g) };
+            push_text(&mut out, &row.cells, [0.0, top], split, None, fonts, atlas)?;
             row.dirty = false;
         }
         Ok(())
@@ -191,7 +206,7 @@ impl Scene {
             let cells: Vec<Cell> = text_cells(overlay.preedit, frame.foreground, CellStyle::default()).collect();
             let width = cw * cells.len() as f32;
             self.overlay_rects.push(rect(left, top, width, ch, frame.background));
-            push_text(&mut self.overlay_glyphs, &cells, [left, top], None, None, fonts, atlas)?;
+            push_text(&mut |_, g| self.overlay_glyphs.push(g), &cells, [left, top], None, None, fonts, atlas)?;
             let underline = top + m.underline_offset as f32;
             self.overlay_rects.push(rect(left, underline, width, stroke, frame.foreground));
             return Ok(());
@@ -208,7 +223,8 @@ impl Scene {
                 // The text under a block cursor takes the background color.
                 if let Some(cell) = under {
                     let cell = std::slice::from_ref(cell);
-                    push_text(&mut self.overlay_glyphs, cell, [left, top], None, Some(frame.background), fonts, atlas)?;
+                    let out = &mut |_: &Cell, g| self.overlay_glyphs.push(g);
+                    push_text(out, cell, [left, top], None, Some(frame.background), fonts, atlas)?;
                 }
             }
             CursorShape::Bar => self.overlay_rects.push(rect(left, top, stroke.max(2.0), ch, color)),
@@ -261,7 +277,7 @@ impl Chrome {
                 }
                 decorations(&mut self.rects, cell, left, line.y, m);
             }
-            push_text(&mut self.glyphs, &line.cells, [line.x, line.y], None, None, fonts, atlas)?;
+            push_text(&mut |_, g| self.glyphs.push(g), &line.cells, [line.x, line.y], None, None, fonts, atlas)?;
         }
         Ok(())
     }
@@ -278,12 +294,13 @@ fn face(style: CellStyle) -> Face {
     Face { weight, italic: style.italic }
 }
 
-/// Shapes `cells`, starting at `left, top`, in runs of one face, and places
-/// each glyph at the cell it draws, so text keeps to the grid whatever the
-/// font's advances. Runs also end around cell `split`, so the cursor never
-/// sits inside a ligature. Glyphs take their cell's color, or `color`.
+/// Shapes `cells`, starting at `left, top`, in runs of one face and blink,
+/// and gives `out` each glyph with its cell, placed at that cell, so text
+/// keeps to the grid whatever the font's advances. Runs also end around cell
+/// `split`, so the cursor never sits inside a ligature. Glyphs take their
+/// cell's color, or `color`.
 fn push_text(
-    out: &mut Vec<GlyphInstance>,
+    out: &mut impl FnMut(&Cell, GlyphInstance),
     cells: &[Cell],
     [left, top]: [f32; 2],
     split: Option<usize>,
@@ -299,9 +316,14 @@ fn push_text(
     let mut starts: Vec<(usize, usize)> = Vec::new();
     let mut start = 0;
     while start < cells.len() {
-        let run_face = face(cells[start].style);
+        let run = |cell: &Cell| (face(cell.style), cell.style.blink);
+        let (run_face, _) = run(&cells[start]);
         let mut end = start + 1;
-        while end < cells.len() && face(cells[end].style) == run_face && split != Some(end) && split != Some(end - 1) {
+        while end < cells.len()
+            && run(&cells[end]) == run(&cells[start])
+            && split != Some(end)
+            && split != Some(end - 1)
+        {
             end += 1;
         }
         text.clear();
@@ -328,7 +350,7 @@ fn push_text(
             };
             if let Some(glyph) = atlas.glyph(fonts, g.font, g.glyph)? {
                 let pen = left + x as f32 * cell_width + (g.x - origin);
-                out.push(glyph_instance(glyph, pen, top, color.unwrap_or(cells[x].fg)));
+                out(&cells[x], glyph_instance(glyph, pen, top, color.unwrap_or(cells[x].fg)));
             }
         }
         start = end;
@@ -415,6 +437,18 @@ mod tests {
         assert_eq!(scene.rects.len(), 2, "the pane's background and one merged red run");
         assert_eq!(scene.rects[1].size[0], 2.0 * fonts.metrics().cell_width as f32);
         assert_eq!(scene.overlay_rects.len(), 1, "bar cursor");
+    }
+
+    #[test]
+    fn blinking_cells_have_batches_of_their_own() {
+        let (mut t, fonts, mut atlas, mut scene) = setup();
+        t.write(b"ab\x1b[5;4mcd\x1b[0me");
+        scene.build(&mut t.frame(), &FOCUSED, &fonts, &mut atlas).expect("room");
+        assert_eq!((scene.glyphs.len(), scene.blink_glyphs.len()), (3, 2));
+        assert_eq!(scene.blink_rects.len(), 2, "the underlines blink too");
+        assert_eq!(scene.rects.len(), 1, "the pane's background");
+        let left = |g: &GlyphInstance| g.pos[0] / fonts.metrics().cell_width as f32;
+        assert!((2.0..4.0).contains(&left(&scene.blink_glyphs[0])), "c sits in its own cell");
     }
 
     #[test]
