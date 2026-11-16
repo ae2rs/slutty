@@ -396,3 +396,33 @@ defaults = false               # start from an empty table, like disable_default
 
 - `config` holds the types, their `Default`, and the loader. Other modules take the typed structs and never see TOML.
 - Reload swaps an `Rc<Config>` on the main thread and marks every pane fully dirty.
+
+## Mux server (later)
+
+Not built now. This is what keeps it cheap to add.
+
+### The seam
+
+- The mux owns panes and terminals. It never touches AppKit or Metal.
+- The UI talks to the mux through two plain types:
+  - `MuxCommand`: key, text, mouse, paste, resize, spawn, split, close, focus, scroll.
+  - `MuxEvent`: pane damaged, title changed, cwd changed, bell, pane exited, layout changed.
+- In-process, commands are method calls and events go through a queue the UI drains on the main thread.
+
+### Adding a server
+
+1. Move the mux into a `slutty-mux` daemon process, started on demand, listening on a Unix socket in `$TMPDIR`.
+2. Serialise `MuxCommand` and `MuxEvent` with a small binary framing.
+3. Ship screen contents, not bytes. The server keeps the libghostty terminal; the client gets row updates from the render state's dirty rows (row id, cells, styles). The client keeps a mirror and draws it.
+4. Detach closes the socket. Panes live on. Attach sends one full frame, then dirty rows.
+
+### Why rows and not raw bytes
+
+- The client never re-parses VT, so attach is instant and memory stays in one place.
+- Dirty rows are already what the renderer wants.
+- libghostty's row ids let the client follow rows as they scroll.
+
+### What must not happen before then
+
+- No AppKit type or callback in `mux`, `terminal` or `pty`.
+- No direct reads of a `Terminal` from the platform layer; go through the mux.
