@@ -46,6 +46,9 @@ pub struct Font {
     pub line_height: f64,
     pub bold_weight: FontWeight,
     pub faint_weight: FontWeight,
+    /// Join character sequences such as `->` into one symbol, where the font
+    /// has one.
+    pub ligatures: bool,
 }
 
 impl Default for Font {
@@ -56,6 +59,7 @@ impl Default for Font {
             line_height: 1.0,
             bold_weight: FontWeight::Demibold,
             faint_weight: FontWeight::Extralight,
+            ligatures: true,
         }
     }
 }
