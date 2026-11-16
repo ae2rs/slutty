@@ -4,6 +4,7 @@ mod actions;
 mod app;
 mod keys;
 mod layout;
+mod notify;
 mod pointer;
 mod quick_select;
 mod state;

@@ -13,6 +13,7 @@ use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize, NSString};
 
 use super::actions;
 use super::layout::{self, Layout};
+use super::notify;
 use super::state::{self, App, Settings, with_app};
 use super::view::TerminalView;
 use crate::config::{self, Config};
@@ -98,6 +99,7 @@ pub fn run(config_path: Option<PathBuf>) -> ExitCode {
         };
     App::start(Mux::new(state::wake_from_any_thread), renderer, settings, scale);
 
+    notify::start();
     if !open_window(mtm, None, None) {
         return ExitCode::FAILURE;
     }

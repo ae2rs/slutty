@@ -165,6 +165,9 @@ fn pump() {
     if let Some(text) = &pump.clipboard {
         super::actions::set_clipboard(text);
     }
+    for (pane, notification) in &pump.notifications {
+        super::notify::post(*pane, notification);
+    }
     if let Some(deadline) = deadline {
         schedule_hold_timeout(deadline);
     }
