@@ -1,6 +1,7 @@
 //! One terminal and the program running in it.
 
 use std::cell::RefMut;
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -12,6 +13,14 @@ use libghostty_vt::key::Mods;
 use crate::config::Config;
 use crate::pty::{Process, Pty, ReadStatus, Spawn, WindowSize};
 use crate::terminal::{Frame, Geometry, KeyInput, MouseInput, Terminal};
+
+/// rho sets this user variable to `1` once it has printed its transcript
+/// onto the normal screen for copy mode, and back to `0` when it wipes it.
+const SCROLLBACK: &str = "rho_scrollback";
+
+/// rho's key for the scrollback handoff: it prints its transcript, or
+/// brings its own screen back.
+const HANDOFF: &[u8] = b"\x13";
 
 /// Output parsed per wake. More waits for the next wake, so a flood of
 /// output cannot starve input and drawing.
@@ -26,6 +35,29 @@ pub struct PaneInfo {
     pub title: String,
     pub cwd: Option<PathBuf>,
     pub process: Option<Process>,
+    /// What rho reports it is doing, while it is the foreground program.
+    pub rho: Option<RhoActivity>,
+}
+
+/// rho's state, from its `rho_activity` user variable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RhoActivity {
+    Working,
+    Question,
+    Stopped,
+    Unread,
+}
+
+impl RhoActivity {
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "working" => Self::Working,
+            "question" => Self::Question,
+            "stopped" => Self::Stopped,
+            "unread" => Self::Unread,
+            _ => return None,
+        })
+    }
 }
 
 impl PaneInfo {
@@ -53,6 +85,8 @@ pub struct Pane {
     /// The directory the program reported (OSC 7); the process's own cwd is
     /// used until it does.
     reported_cwd: Option<PathBuf>,
+    /// Variables the program set with OSC 1337 SetUserVar.
+    user_vars: BTreeMap<String, String>,
 }
 
 impl Pane {
@@ -66,7 +100,14 @@ impl Pane {
         }
         let wake = Arc::clone(wake);
         let pty = Pty::spawn(&spawn, window_size(geometry), move || wake())?;
-        let mut pane = Self { terminal, pty, closed: false, info: PaneInfo::default(), reported_cwd: None };
+        let mut pane = Self {
+            terminal,
+            pty,
+            closed: false,
+            info: PaneInfo::default(),
+            reported_cwd: None,
+            user_vars: BTreeMap::new(),
+        };
         pane.refresh_info();
         Ok(pane)
     }
@@ -79,9 +120,15 @@ impl Pane {
         buf.clear();
         let status = self.pty.read(buf, PUMP_BUDGET);
         if !buf.is_empty() {
-            self.terminal.write(buf);
+            let vars = self.terminal.write(buf);
+            let printed = vars.iter().any(|(name, value)| name == SCROLLBACK && value == "1");
+            self.user_vars.extend(vars);
             pumped.output = true;
             pumped.info_changed = self.refresh_info();
+            if printed && self.shows_rho_scrollback() {
+                self.terminal.close_search();
+                self.terminal.start_copy_mode();
+            }
         }
         self.flush();
         pumped.clipboard = self.terminal.take_clipboard();
@@ -102,11 +149,16 @@ impl Pane {
         if let Some(cwd) = self.terminal.take_pwd() {
             self.reported_cwd = Some(cwd);
         }
-        let mut info = PaneInfo { title: self.info.title.clone(), cwd: None, process: self.pty.foreground() };
+        let mut info =
+            PaneInfo { title: self.info.title.clone(), cwd: None, process: self.pty.foreground(), rho: None };
         if let Some(title) = self.terminal.take_title() {
             info.title = title;
         }
         info.cwd = self.reported_cwd.clone().or_else(|| info.process.as_ref().and_then(|p| p.cwd.clone()));
+        // A rho that died leaves its last state behind; only a running one counts.
+        if runs_rho(info.process.as_ref()) {
+            info.rho = self.user_vars.get("rho_activity").and_then(|v| RhoActivity::parse(v));
+        }
         if info == self.info {
             return false;
         }
@@ -125,6 +177,21 @@ impl Pane {
 
     pub fn info(&self) -> &PaneInfo {
         &self.info
+    }
+
+    /// Whether rho runs here.
+    pub(super) fn runs_rho(&self) -> bool {
+        runs_rho(self.info.process.as_ref())
+    }
+
+    /// Whether rho runs here with its transcript printed for copy mode.
+    pub(super) fn shows_rho_scrollback(&self) -> bool {
+        self.runs_rho() && self.user_vars.get(SCROLLBACK).is_some_and(|v| v == "1")
+    }
+
+    /// Asks rho to print its transcript, or to bring its screen back.
+    pub(super) fn rho_handoff(&mut self) {
+        self.send(HANDOFF);
     }
 
     /// Whether closing the pane would stop something other than a shell.
@@ -203,6 +270,11 @@ impl Pane {
     fn flush(&mut self) {
         self.pty.write(&self.terminal.take_replies());
     }
+}
+
+/// The process check matters: a rho that died leaves its variables set.
+fn runs_rho(process: Option<&Process>) -> bool {
+    process.is_some_and(|p| p.name() == "rho")
 }
 
 fn window_size(g: Geometry) -> WindowSize {

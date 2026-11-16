@@ -11,7 +11,7 @@ mod window;
 pub use ids::{PaneId, WindowId};
 pub use model::{Mux, TabView, Visible};
 pub use modes::ModeKey;
-pub use pane::Pane;
 #[cfg(test)]
 pub use pane::PaneInfo;
+pub use pane::{Pane, RhoActivity};
 pub use tree::{Axis, Direction, Rect};

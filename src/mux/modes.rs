@@ -26,7 +26,14 @@ enum CopyKey {
 }
 
 impl Pane {
+    /// Opens copy mode. rho draws on the alternate screen, which has no
+    /// scrollback, so in a rho pane copy mode opens once rho has printed its
+    /// transcript onto the normal screen.
     pub fn start_copy_mode(&mut self) {
+        if self.runs_rho() && !self.shows_rho_scrollback() {
+            self.rho_handoff();
+            return;
+        }
         self.terminal.close_search();
         self.terminal.start_copy_mode();
     }
@@ -82,13 +89,21 @@ impl Pane {
             }
             return ModeKey::Used;
         }
-        match copy_key(press) {
-            Some(CopyKey::Command(command)) => self.terminal.copy_mode(command),
-            Some(CopyKey::Copy) => return ModeKey::Closed(self.terminal.close_copy_mode(true)),
-            Some(CopyKey::Close) => return ModeKey::Closed(self.terminal.close_copy_mode(false)),
+        let copy = match copy_key(press) {
+            Some(CopyKey::Command(command)) => {
+                self.terminal.copy_mode(command);
+                return ModeKey::Used;
+            }
+            Some(CopyKey::Copy) => true,
+            Some(CopyKey::Close) => false,
             None => return ModeKey::Unused,
+        };
+        let text = self.terminal.close_copy_mode(copy);
+        // Back to rho's own screen.
+        if self.shows_rho_scrollback() {
+            self.rho_handoff();
         }
-        ModeKey::Used
+        ModeKey::Closed(text)
     }
 
     fn search_key(&mut self, press: KeyPress, needle: String) -> ModeKey {
