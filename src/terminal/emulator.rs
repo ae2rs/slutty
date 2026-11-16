@@ -1,4 +1,7 @@
 use std::cell::{Cell, RefCell, RefMut};
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStringExt;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -22,20 +25,23 @@ use crate::config::{self, Config};
 /// gets its hold cancelled. libghostty has no clock, so this is ours.
 const HOLD_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Pane geometry in device pixels.
+/// A grid of cells, with the cell size in device pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Geometry {
     pub cols: u16,
     pub rows: u16,
     pub cell_width: u32,
     pub cell_height: u32,
-    /// The whole drawable area, padding included.
-    pub width: u32,
-    pub height: u32,
-    pub padding_left: u32,
-    pub padding_top: u32,
-    pub padding_right: u32,
-    pub padding_bottom: u32,
+}
+
+impl Geometry {
+    pub fn width(&self) -> u32 {
+        u32::from(self.cols) * self.cell_width
+    }
+
+    pub fn height(&self) -> u32 {
+        u32::from(self.rows) * self.cell_height
+    }
 }
 
 /// One key event, already translated by the platform.
@@ -70,6 +76,7 @@ struct Shared {
     held_since: Cell<Option<Instant>>,
     replies: RefCell<Vec<u8>>,
     title_changed: Cell<bool>,
+    pwd_changed: Cell<bool>,
     geometry: Cell<Geometry>,
 }
 
@@ -107,6 +114,7 @@ impl Terminal {
             held_since: Cell::new(None),
             replies: RefCell::new(Vec::new()),
             title_changed: Cell::new(false),
+            pwd_changed: Cell::new(false),
             geometry: Cell::new(geometry),
         });
 
@@ -119,6 +127,10 @@ impl Terminal {
         .on_title_changed({
             let shared = Rc::clone(&shared);
             move |_| shared.title_changed.set(true)
+        })?
+        .on_pwd_changed({
+            let shared = Rc::clone(&shared);
+            move |_| shared.pwd_changed.set(true)
         })?
         .on_size({
             let shared = Rc::clone(&shared);
@@ -207,6 +219,12 @@ impl Terminal {
             .title_changed
             .replace(false)
             .then(|| String::from_utf8_lossy(self.vt.title().unwrap_or_default()).into_owned())
+    }
+
+    /// The new working directory, if the program reported one (OSC 7) since
+    /// the last call.
+    pub fn take_pwd(&self) -> Option<PathBuf> {
+        self.shared.pwd_changed.replace(false).then(|| pwd_path(self.vt.pwd().unwrap_or_default())).flatten()
     }
 
     pub fn geometry(&self) -> Geometry {
@@ -313,14 +331,14 @@ impl Terminal {
         self.mouse_encoder
             .set_options_from_terminal(&self.vt)
             .set_size(mouse::EncoderSize {
-                screen_width: g.width,
-                screen_height: g.height,
+                screen_width: g.width(),
+                screen_height: g.height(),
                 cell_width: g.cell_width,
                 cell_height: g.cell_height,
-                padding_top: g.padding_top,
-                padding_bottom: g.padding_bottom,
-                padding_left: g.padding_left,
-                padding_right: g.padding_right,
+                padding_top: 0,
+                padding_bottom: 0,
+                padding_left: 0,
+                padding_right: 0,
             })?
             .set_any_button_pressed(self.buttons_down > 0)
             .set_track_last_cell(true)
@@ -345,6 +363,32 @@ impl Terminal {
         }
         Ok(())
     }
+}
+
+/// A path from what the shell reported: a `file://host/path` URI with
+/// percent escapes (OSC 7), or a bare path.
+fn pwd_path(raw: &[u8]) -> Option<PathBuf> {
+    let path = match raw.strip_prefix(b"file://") {
+        Some(rest) => &rest[rest.iter().position(|&b| b == b'/')?..],
+        None => raw,
+    };
+    if !path.starts_with(b"/") {
+        return None;
+    }
+    let mut out = Vec::with_capacity(path.len());
+    let mut bytes = path.iter();
+    while let Some(&b) = bytes.next() {
+        let hex = |b: Option<&u8>| b.and_then(|&b| char::from(b).to_digit(16));
+        if b == b'%'
+            && let (Some(hi), Some(lo)) = (hex(bytes.clone().next()), hex(bytes.clone().nth(1)))
+        {
+            out.push((hi * 16 + lo) as u8);
+            bytes.nth(1);
+        } else {
+            out.push(b);
+        }
+    }
+    Some(PathBuf::from(OsString::from_vec(out)))
 }
 
 fn rgb([r, g, b]: config::Rgb) -> Rgb {
@@ -400,18 +444,7 @@ mod tests {
     use crate::terminal::Grapheme;
 
     fn terminal() -> Terminal {
-        let geometry = Geometry {
-            cols: 10,
-            rows: 3,
-            cell_width: 8,
-            cell_height: 16,
-            width: 96,
-            height: 48,
-            padding_left: 8,
-            padding_top: 0,
-            padding_right: 8,
-            padding_bottom: 0,
-        };
+        let geometry = Geometry { cols: 10, rows: 3, cell_width: 8, cell_height: 16 };
         Terminal::new(geometry, &Config::default()).expect("terminal")
     }
 
@@ -514,5 +547,16 @@ mod tests {
         t.write(b"\x1b]2;hello\x07");
         assert_eq!(t.take_title().as_deref(), Some("hello"));
         assert_eq!(t.take_title(), None);
+        t.write(b"\x1b]7;file://host/Users/me/My%20Dir\x1b\\");
+        assert_eq!(t.take_pwd(), Some(PathBuf::from("/Users/me/My Dir")));
+        assert_eq!(t.take_pwd(), None);
+    }
+
+    #[test]
+    fn pwd_paths_come_from_uris_or_paths() {
+        assert_eq!(pwd_path(b"file:///tmp"), Some(PathBuf::from("/tmp")));
+        assert_eq!(pwd_path(b"/a%2"), Some(PathBuf::from("/a%2")));
+        assert_eq!(pwd_path(b"relative"), None);
+        assert_eq!(pwd_path(b""), None);
     }
 }
