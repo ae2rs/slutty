@@ -26,6 +26,8 @@ pub struct Pump {
     pub closed: Vec<WindowId>,
     /// Output is still queued; pump again soon.
     pub more: bool,
+    /// Text a program put on the clipboard (OSC 52); the last one wins.
+    pub clipboard: Option<String>,
 }
 
 /// One tab as the tab bar shows it.
@@ -256,6 +258,9 @@ impl Mux {
         for (&id, pane) in &mut self.panes {
             let pumped = pane.pump(&mut self.buf);
             pump.more |= pumped.more;
+            if pumped.clipboard.is_some() {
+                pump.clipboard = pumped.clipboard;
+            }
             let Some((window, w)) = self.windows.iter().find(|(_, w)| w.position(id).is_some()) else { continue };
             if pumped.output && w.active_tab().tree.contains(id) {
                 pump.redraw.insert(*window);

@@ -42,10 +42,11 @@ pub(super) struct Pumped {
     pub more: bool,
     pub info_changed: bool,
     pub closed: bool,
+    pub clipboard: Option<String>,
 }
 
 pub struct Pane {
-    terminal: Terminal,
+    pub(super) terminal: Terminal,
     pty: Pty,
     closed: bool,
     info: PaneInfo,
@@ -83,6 +84,7 @@ impl Pane {
             pumped.info_changed = self.refresh_info();
         }
         self.flush();
+        pumped.clipboard = self.terminal.take_clipboard();
         match status {
             ReadStatus::Drained => {}
             ReadStatus::More => pumped.more = true,
@@ -110,6 +112,15 @@ impl Pane {
         }
         self.info = info;
         true
+    }
+
+    /// For selecting and reading text, which sends nothing to the program.
+    pub fn terminal(&self) -> &Terminal {
+        &self.terminal
+    }
+
+    pub fn terminal_mut(&mut self) -> &mut Terminal {
+        &mut self.terminal
     }
 
     pub fn info(&self) -> &PaneInfo {
