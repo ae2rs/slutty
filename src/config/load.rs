@@ -58,7 +58,7 @@ mod tests {
 
             [theme]
             name = "tokyo-night"
-            colors = { background = "#000000", brights = ["#000001", "#000002", "#000003", "#000004", "#000005", "#000006", "#000007", "#000008"] }
+            colors = { background = "#000000", inactive_titlebar_fg = "#000009", brights = ["#000001", "#000002", "#000003", "#000004", "#000005", "#000006", "#000007", "#000008"] }
 
             [window]
             padding = { left = "1cell", right = "2 cells", top = 4, bottom = "1.5pt" }
@@ -81,6 +81,7 @@ mod tests {
         assert_eq!(config.theme.background, [0, 0, 0]);
         assert_eq!(config.theme.ansi[15], [0, 0, 8]);
         assert_eq!(config.theme.ansi[0], Config::default().theme.ansi[0]);
+        assert_eq!(config.theme.inactive_titlebar_fg, [0, 0, 9]);
         assert_eq!(config.window.padding.right, Length::Cells(2));
         assert_eq!(config.window.padding.top, Length::Points(4.0));
         assert_eq!(config.window.padding.bottom, Length::Points(1.5));

@@ -14,6 +14,10 @@ pub struct Theme {
     pub split: Rgb,
     pub selection_fg: Rgb,
     pub selection_bg: Rgb,
+    /// The tab bar while its window does not have the keyboard, as WezTerm's
+    /// `window_frame`.
+    pub inactive_titlebar_bg: Rgb,
+    pub inactive_titlebar_fg: Rgb,
     /// The 16 ANSI colors: normal then bright.
     pub ansi: [Rgb; 16],
 }
@@ -29,6 +33,9 @@ impl Theme {
             split: hex(0x444444),
             selection_fg: hex(0xc0caf5),
             selection_bg: hex(0x283457),
+            // The scheme's `tab_bar.inactive_tab`.
+            inactive_titlebar_bg: hex(0x16161e),
+            inactive_titlebar_fg: hex(0x545c7e),
             ansi: [
                 hex(0x15161e),
                 hex(0xf7768e),
@@ -86,6 +93,8 @@ struct Colors {
     split: Option<Hex>,
     selection_fg: Option<Hex>,
     selection_bg: Option<Hex>,
+    inactive_titlebar_bg: Option<Hex>,
+    inactive_titlebar_fg: Option<Hex>,
     ansi: Option<[Hex; 8]>,
     brights: Option<[Hex; 8]>,
 }
@@ -103,6 +112,8 @@ impl From<ThemeFile> for Theme {
             (&mut theme.split, c.split),
             (&mut theme.selection_fg, c.selection_fg),
             (&mut theme.selection_bg, c.selection_bg),
+            (&mut theme.inactive_titlebar_bg, c.inactive_titlebar_bg),
+            (&mut theme.inactive_titlebar_fg, c.inactive_titlebar_fg),
         ] {
             if let Some(Hex(rgb)) = color {
                 *slot = rgb;
