@@ -39,6 +39,7 @@ use crate::config::{self, Config, OptionAsAlt};
 use crate::keys::Outcome;
 use crate::mux::{Axis, ModeKey, PaneId, Rect, Visible, WindowId};
 use crate::renderer::{Line, Overlay, PaneDraw, RectInstance, Renderer, Shown, Surface, Tint};
+use crate::status;
 use crate::terminal::{CellStyle, Highlight, KeyInput, MouseInput, SearchStatus};
 
 pub struct Ivars {
@@ -61,6 +62,13 @@ pub struct Ivars {
     cursor_blinks: Cell<bool>,
     /// The blinking zones the window's surface shows.
     shown: Cell<Shown>,
+    /// When the window last gained focus, which the stats' refreshes count
+    /// from.
+    focused_at: Cell<Instant>,
+    /// The tab bar shows system stats, as last drawn.
+    shows_status: Cell<bool>,
+    /// The stats refresh last made, from [`crate::animation::Phase::status`].
+    status_phase: Cell<u128>,
     link: OnceCell<Retained<CADisplayLink>>,
     layout: Cell<Layout>,
     /// Each tab's cells in the tab bar, for clicks.
@@ -404,6 +412,9 @@ impl TerminalView {
             input_at: Cell::new(Instant::now()),
             cursor_blinks: Cell::new(false),
             shown: Cell::new(Shown::ALL),
+            focused_at: Cell::new(Instant::now()),
+            shows_status: Cell::new(false),
+            status_phase: Cell::new(0),
             link: OnceCell::new(),
             layout: Cell::new(layout),
             tab_cells: RefCell::new(Vec::new()),
@@ -544,26 +555,36 @@ impl TerminalView {
         let focused = ivars.focused.get();
         let marked = ivars.marked.borrow();
         let drawn = with_app(|app| {
-            let App { mux, renderer, settings, .. } = app;
+            let App { mux, renderer, settings, status, .. } = app;
             let config = &settings.config;
             let m = renderer.metrics();
             let mut chrome = Vec::new();
             let mut strip = None;
+            let items = &config.tab_bar.status;
+            let shows_status = layout.tab_bar && !items.is_empty() && settings.error.is_none();
+            ivars.shows_status.set(shows_status);
             if layout.tab_bar {
                 let cols = (layout.width / m.cell_width) as usize;
+                let status_cell = cols.saturating_sub(if shows_status { status::width(items) } else { 0 });
                 let bar = tab_bar::build(
                     &mux.tabs(window),
                     &config.theme,
-                    cols,
+                    status_cell,
                     config.tab_bar.max_width,
                     layout.width as f32,
                     focused,
                     ivars.hover_tab.get(),
                 );
                 *ivars.tab_cells.borrow_mut() = bar.tabs;
-                if !bar.spinners.is_empty() && settings.error.is_none() {
+                if (!bar.spinners.is_empty() || shows_status) && settings.error.is_none() {
                     let frame = ticker::phase(Live::default(), Instant::now()).spinner;
-                    strip = Some(Strip { spinners: bar.spinners, background: bar.line.background, frame });
+                    let status = if shows_status {
+                        tab_bar::status(items, &status.stats(), &config.theme, focused)
+                    } else {
+                        Vec::new()
+                    };
+                    let background = bar.line.background;
+                    strip = Some(Strip { spinners: bar.spinners, background, frame, status_cell, status });
                 }
                 chrome.push(bar.line);
             }
@@ -725,6 +746,7 @@ impl TerminalView {
             spinner: on_screen && ivars.strip.borrow().as_ref().is_some_and(|s| !s.spinners.is_empty()),
             cursor: (on_screen && ivars.focused.get() && ivars.cursor_blinks.get()).then(|| ivars.input_at.get()),
             text: on_screen && ivars.focused.get() && ivars.surface.borrow().blinks_text(),
+            status: (on_screen && ivars.focused.get() && ivars.shows_status.get()).then(|| ivars.focused_at.get()),
         }
     }
 
@@ -742,13 +764,23 @@ impl TerminalView {
         let ivars = self.ivars();
         let live = self.live();
         let phase = ticker::phase(live, now);
-        let strip = ivars.strip.borrow().clone();
-        if let Some(strip) = strip
-            && live.spinner
-            && strip.frame != phase.spinner
-        {
-            let strip = Strip { frame: phase.spinner, ..strip };
-            with_app(|app| self.show_strip(&mut app.renderer, Some(strip)));
+        if let Some(current) = ivars.strip.borrow().clone() {
+            let mut strip = current.clone();
+            if live.spinner {
+                strip.frame = phase.spinner;
+            }
+            let refresh = live.status.is_some() && ivars.status_phase.replace(phase.status) != phase.status;
+            if refresh || strip != current {
+                with_app(|app| {
+                    if refresh {
+                        app.status.refresh(now);
+                        let config = &app.settings.config;
+                        strip.status =
+                            tab_bar::status(&config.tab_bar.status, &app.status.stats(), &config.theme, true);
+                    }
+                    self.show_strip(&mut app.renderer, Some(strip));
+                });
+            }
         }
         let shown = Shown { cursor: phase.cursor, text: phase.text };
         if shown != ivars.shown.get() {
@@ -800,7 +832,16 @@ impl TerminalView {
     fn set_focused(&self, focused: bool) {
         self.ivars().focused.set(focused);
         if focused {
-            self.ivars().input_at.set(Instant::now());
+            let now = Instant::now();
+            self.ivars().input_at.set(now);
+            self.ivars().focused_at.set(now);
+            // The stats show fresh at once; `draw` lays them out.
+            self.ivars().status_phase.set(0);
+            with_app(|app| {
+                if !app.settings.config.tab_bar.status.is_empty() {
+                    app.status.refresh(now);
+                }
+            });
         }
         let window = self.ivars().window;
         with_app(|app| app.mux.focus(window, focused));

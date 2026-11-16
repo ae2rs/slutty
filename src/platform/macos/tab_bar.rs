@@ -7,9 +7,10 @@ use std::path::Path;
 use libghostty_vt::color::Rgb;
 
 use crate::animation;
-use crate::config::{self, Theme};
+use crate::config::{self, Stat, Theme};
 use crate::mux::{RhoActivity, TabView};
 use crate::renderer::Line;
+use crate::status::{self, Ink, Stats};
 use crate::terminal::CellStyle;
 
 /// The longest directory name shown before it is cut with `…`.
@@ -91,29 +92,59 @@ pub fn build(
     TabBar { line, tabs: ranges, spinners }
 }
 
-/// What the strip over the tab bar shows: the working tabs' marks at `frame`
-/// of the spinner, each on a cell of the tab bar's `background`.
+/// What the strip over the tab bar shows, on the tab bar's `background`: the
+/// working tabs' marks at `frame` of the spinner, and the system stats at the
+/// right end, from cell `status_cell`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Strip {
     pub spinners: Vec<Spinner>,
     pub background: Rgb,
     pub frame: usize,
+    pub status_cell: usize,
+    pub status: Vec<(String, Rgb)>,
 }
 
 impl Strip {
-    /// One line per mark, for a layer over the tab bar `cell_width` pixels
-    /// to a cell.
+    /// One line per mark, then the stats, for a layer over the tab bar
+    /// `cell_width` pixels to a cell.
     pub fn lines(&self, cell_width: f32) -> Vec<Line> {
         let mark = animation::SPINNER[self.frame % animation::SPINNER.len()];
-        self.spinners
+        let mut lines: Vec<Line> = self
+            .spinners
             .iter()
             .map(|s| {
                 let mut line = Line::new(s.cell as f32 * cell_width, 0.0, cell_width, self.background);
                 line.push_str(mark.encode_utf8(&mut [0; 4]), s.color, CellStyle::default());
                 line
             })
-            .collect()
+            .collect();
+        if !self.status.is_empty() {
+            let mut line = Line::new(self.status_cell as f32 * cell_width, 0.0, 0.0, self.background);
+            for (text, color) in &self.status {
+                line.push_str(text, *color, CellStyle::default());
+            }
+            line.width = line.cells.len() as f32 * cell_width;
+            lines.push(line);
+        }
+        lines
     }
+}
+
+/// The stats `items` show, colored as the tab bar is: grey without `focused`.
+pub fn status(items: &[Stat], stats: &Stats, theme: &Theme, focused: bool) -> Vec<(String, Rgb)> {
+    let rgb = |[r, g, b]: config::Rgb| Rgb { r, g, b };
+    status::segments(items, stats)
+        .into_iter()
+        .map(|(text, ink)| {
+            let color = match ink {
+                _ if !focused => theme.inactive_titlebar_fg,
+                Ink::Text => theme.foreground,
+                Ink::Down => theme.ansi[4],
+                Ink::Up => theme.ansi[2],
+            };
+            (text, rgb(color))
+        })
+        .collect()
 }
 
 fn dir_name(path: &Path) -> String {
@@ -176,15 +207,34 @@ mod tests {
     }
 
     #[test]
-    fn the_spinner_layer_draws_each_mark_at_its_cell() {
+    fn the_strip_draws_each_mark_and_the_stats_at_their_cells() {
         let blue = Rgb { r: 0, g: 0, b: 255 };
         let black = Rgb { r: 0, g: 0, b: 0 };
-        let frame = Strip { spinners: vec![Spinner { cell: 3, color: blue }], background: black, frame: 12 };
-        let lines = frame.lines(10.0);
-        assert_eq!(lines.len(), 1);
+        let strip = Strip {
+            spinners: vec![Spinner { cell: 3, color: blue }],
+            background: black,
+            frame: 12,
+            status_cell: 70,
+            status: vec![(" 7%".into(), blue), (" ".into(), black)],
+        };
+        let lines = strip.lines(10.0);
+        assert_eq!(lines.len(), 2);
         assert_eq!((lines[0].x, lines[0].width, lines[0].background), (30.0, 10.0, black));
         assert_eq!(lines[0].cells[0].text, crate::terminal::Grapheme::Char(animation::SPINNER[2]));
         assert_eq!(lines[0].cells[0].fg, blue);
+        assert_eq!((lines[1].x, lines[1].width, lines[1].cells.len()), (700.0, 40.0, 4));
+        assert_eq!((lines[1].cells[1].fg, lines[1].cells[3].fg), (blue, black));
+    }
+
+    #[test]
+    fn stats_grey_out_with_the_bar() {
+        let theme = Theme::default();
+        let rgb = |[r, g, b]: config::Rgb| Rgb { r, g, b };
+        let colors = |focused| -> Vec<Rgb> {
+            status(&[Stat::Net], &Stats::default(), &theme, focused).into_iter().map(|(_, c)| c).collect()
+        };
+        assert!(colors(true).contains(&rgb(theme.ansi[4])), "the received arrow is blue");
+        assert!(colors(false).iter().all(|&c| c == rgb(theme.inactive_titlebar_fg)));
     }
 
     #[test]

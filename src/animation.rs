@@ -19,6 +19,12 @@ const CURSOR_CUTOFF: Duration = Duration::from_secs(5);
 /// How long blinking text stays on, then off.
 const TEXT_BLINK: Duration = Duration::from_millis(500);
 
+/// How often the system stats refresh.
+const STATUS_REFRESH: Duration = Duration::from_secs(2);
+
+/// The first refresh after focus, soon enough for fresh rates.
+const STATUS_FIRST: Duration = Duration::from_millis(500);
+
 /// What animates in one window now: its live zones.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Live {
@@ -29,6 +35,8 @@ pub struct Live {
     pub cursor: Option<Instant>,
     /// A key window on screen shows text that blinks.
     pub text: bool,
+    /// A key window on screen shows system stats, focused since this.
+    pub status: Option<Instant>,
 }
 
 /// What the zones show at one moment.
@@ -40,6 +48,8 @@ pub struct Phase {
     pub cursor: bool,
     /// Blinking text is in its visible half.
     pub text: bool,
+    /// Counts the stats' refreshes; a change asks for one.
+    pub status: u128,
 }
 
 /// Time for every animation, counted from one epoch so that zones in
@@ -59,6 +69,9 @@ impl Clock {
             spinner: (steps(self.epoch, now, SPINNER_FRAME) % SPINNER.len() as u128) as usize,
             cursor: live.cursor.is_none_or(|since| cursor_on(since, now)),
             text: !live.text || steps(self.epoch, now, TEXT_BLINK).is_multiple_of(2),
+            status: live.status.map_or(0, |since| {
+                if now < since + STATUS_FIRST { 0 } else { 1 + steps(self.epoch, now, STATUS_REFRESH) }
+            }),
         }
     }
 
@@ -67,7 +80,11 @@ impl Clock {
         let spinner = live.spinner.then(|| next_step(self.epoch, now, SPINNER_FRAME));
         let cursor = live.cursor.and_then(|since| next_cursor_change(since, now));
         let text = live.text.then(|| next_step(self.epoch, now, TEXT_BLINK));
-        [spinner, cursor, text].into_iter().flatten().min()
+        let status = live.status.map(|since| {
+            let first = since + STATUS_FIRST;
+            if now < first { first } else { next_step(self.epoch, now, STATUS_REFRESH) }
+        });
+        [spinner, cursor, text, status].into_iter().flatten().min()
     }
 }
 
@@ -171,10 +188,27 @@ mod tests {
     }
 
     #[test]
+    fn stats_refresh_soon_after_focus_then_every_two_seconds() {
+        let epoch = Instant::now();
+        let clock = Clock::new(epoch);
+        let focus = epoch + 3_300 * MS;
+        let live = Live { status: Some(focus), ..Live::default() };
+        let refresh = |ms: u32| clock.phase(live, focus + ms * MS).status;
+        assert_eq!((refresh(0), refresh(499)), (0, 0), "focus itself refreshes");
+        assert_ne!(refresh(500), refresh(499));
+        assert_eq!(refresh(500), refresh(699), "in step with the epoch after");
+        assert_ne!(refresh(700), refresh(699));
+        let next = |ms: u32| clock.next_change(live, focus + ms * MS);
+        assert_eq!(next(0), Some(focus + 500 * MS));
+        assert_eq!(next(500), Some(epoch + 4_000 * MS));
+        assert_eq!(next(800), Some(epoch + 6_000 * MS));
+    }
+
+    #[test]
     fn the_timer_wakes_for_the_soonest_zone() {
         let epoch = Instant::now();
         let clock = Clock::new(epoch);
-        let live = Live { spinner: true, cursor: Some(epoch + 50 * MS), text: false };
+        let live = Live { spinner: true, cursor: Some(epoch + 50 * MS), ..Live::default() };
         assert_eq!(clock.next_change(live, epoch + 820 * MS), Some(epoch + 850 * MS));
         assert_eq!(clock.next_change(live, epoch + 860 * MS), Some(epoch + 900 * MS));
     }

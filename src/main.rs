@@ -7,6 +7,7 @@ mod platform;
 mod pty;
 mod renderer;
 mod scan;
+mod status;
 mod terminal;
 
 fn main() -> std::process::ExitCode {

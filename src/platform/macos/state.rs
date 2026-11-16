@@ -20,6 +20,7 @@ use crate::font::Fonts;
 use crate::keys::Matcher;
 use crate::mux::{Mux, WindowId};
 use crate::renderer::Renderer;
+use crate::status::Monitor;
 
 /// The config in effect, where it came from, and why the file could not be
 /// used, if it could not.
@@ -41,6 +42,8 @@ pub struct App {
     /// Device pixels per point of the screen the fonts are made for.
     pub scale: f64,
     pub tab_bar: bool,
+    /// The system stats the tab bar shows, for every window.
+    pub status: Monitor,
     watcher: Option<Watcher>,
     hold_timer: bool,
 }
@@ -92,6 +95,7 @@ impl App {
             renderer,
             font_size: settings.config.font.size,
             tab_bar: settings.config.tab_bar.enabled,
+            status: Monitor::new(),
             settings,
             matcher: Matcher::default(),
             swallowed: Vec::new(),
