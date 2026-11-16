@@ -1,3 +1,4 @@
+mod animation;
 mod config;
 mod font;
 mod keys;
