@@ -5,12 +5,13 @@
 #   scrollback;
 # - mine: both with the user's own config.
 # Each window runs alone on an empty AeroSpace workspace, so it fills the
-# screen and has focus. Writes raw results to docs/bench/<setup>/<terminal>/
-# and prints a summary. With --screenshot, also captures docs/screenshot.png.
+# screen. It is not key: macOS does not activate an app a script started, so
+# idle numbers are for an unfocused window. Writes raw results to
+# docs/bench/<setup>/<terminal>/ and prints a summary.
 #
-# Every run takes focus: start it, then leave the Mac alone until it ends
+# Every run raises a window: start it, then leave the Mac alone until it ends
 # (about 20 minutes). It stops if the keyboard or mouse is used.
-# Usage: scripts/bench.sh [--screenshot] [defaults|mine]...
+# Usage: scripts/bench.sh [defaults|mine]...
 set -eu
 
 cd "$(dirname "$0")/.."
@@ -49,10 +50,9 @@ start() {
     place
 }
 
-# Moves the started terminal's window alone onto the empty workspace $bench_ws
-# and focuses it, then lets its command run. A window opened from a script is
-# not made key, and AeroSpace would tile it beside others. Sets $pid to the
-# process that draws.
+# Moves the started terminal's window alone onto the empty workspace $bench_ws,
+# where it fills the screen instead of being tiled beside others, then lets its
+# command run. Sets $pid to the process that draws.
 place() {
     i=0
     while :; do
@@ -69,7 +69,6 @@ place() {
     done
     aerospace move-node-to-workspace --window-id "$window" "$bench_ws"
     aerospace workspace "$bench_ws"
-    aerospace focus --window-id "$window"
     sleep 2
     touch "$work/go"
 }
@@ -97,7 +96,7 @@ stop() {
 }
 
 # Stops the batch if someone used the keyboard or mouse in the last minute:
-# each run takes focus.
+# each run raises a window.
 away() {
     idle=$(ioreg -c IOHIDSystem | awk '/HIDIdleTime/ { print int($NF / 1e9); exit }')
     if [ "$idle" -lt 60 ]; then
@@ -139,31 +138,6 @@ scrollback() {
     stop
 }
 
-# slutty with the user's config, a git log on the left and nvim on the right.
-# The split and nvim are typed with synthetic keys, only while slutty has
-# focus; without Accessibility access the shot has one pane.
-screenshot() {
-    setup=mine
-    dir=$work
-    start slutty "clear; git log --graph --oneline --decorate --color -24; touch '$work/ready'; exec zsh -i"
-    await
-    sleep 2
-    if [ "$(aerospace list-windows --focused --format '%{app-pid}')" = "$pid" ]; then
-        keys() { osascript -e "tell application \"System Events\" to $1" 2> /dev/null || true; }
-        keys 'keystroke "s" using control down'
-        keys 'keystroke "v"'
-        sleep 1
-        keys 'keystroke "nvim src/main.rs"'
-        keys 'key code 36'
-        sleep 3
-    else
-        echo "slutty lost focus; the screenshot has one pane" >&2
-    fi
-    screencapture -x -o -l "$window" "$root/docs/screenshot.png"
-    echo "captured docs/screenshot.png"
-    stop
-}
-
 # Mean of each vtebench column, in ms.
 means() {
     awk 'NR == 1 { for (i = 1; i <= NF; i++) name[i] = $i; n = NF; next }
@@ -171,11 +145,6 @@ means() {
         END { for (i = 1; i <= n; i++) printf "%s %.2f\n", name[i], sum[i] / count[i] }' "$1"
 }
 
-shot=false
-if [ "${1:-}" = --screenshot ]; then
-    shot=true
-    shift
-fi
 setups=${*:-defaults mine}
 
 [ -d "$vte" ] || git clone --quiet --depth 1 --branch v0.3.1 https://github.com/alacritty/vtebench "$vte"
@@ -208,10 +177,6 @@ for setup in $setups; do
         done
     done
 done
-if $shot; then
-    away
-    screenshot
-fi
 
 cat "$out/machine.txt"
 for setup in $setups; do
