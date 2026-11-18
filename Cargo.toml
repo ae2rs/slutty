@@ -3,6 +3,13 @@ name = "slutty"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+description = "A fast, native macOS terminal emulator and multiplexer built on libghostty"
+repository = "https://github.com/ae2rs/slutty"
+readme = "README.md"
+keywords = ["terminal", "terminal-emulator", "multiplexer", "macos", "ghostty"]
+categories = ["command-line-utilities", "gui", "os::macos-apis"]
+rust-version = "1.96"
+include = ["/src", "/assets/fonts", "/LICENSE-APACHE", "/LICENSE-MIT", "/README.md"]
 
 [dependencies]
 # libghostty-vt 1.0.1. crates.io only has pre-1.0 releases of the bindings.
