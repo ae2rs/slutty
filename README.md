@@ -82,11 +82,11 @@ leader = "ctrl+s"
 
 ## Performance
 
-Against WezTerm on an M4 Max, with the same config ([details](docs/benchmarks.md)):
+Against WezTerm on an M4 Max, both as shipped and both with my config ([details](docs/benchmarks.md)):
 
-- **Throughput:** 1.2–4.9× faster on every vtebench test.
-- **Idle:** no CPU and no wake-ups at a still screen.
-- **Memory:** 187 MB at launch against 380 MB; 421 MB against 675 MB with 100 000 lines of scrollback.
+- **Throughput:** 1.2–5.2× faster on every vtebench test.
+- **Idle:** as shipped, no CPU and no wake-ups at a still screen. With tab bar stats on, about half WezTerm's CPU.
+- **Memory:** as shipped, 159 MB at launch against 289 MB. With 100 000 lines of scrollback the footprints are close, but slutty's resident size is higher.
 
 ## Design
 

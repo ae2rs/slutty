@@ -1,1 +1,3 @@
-61 267
+throughput 56 214
+idle 56 214
+scrollback 56 214
