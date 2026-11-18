@@ -2,6 +2,8 @@
 //! rows libghostty marked dirty, and rows the cursor left or entered, are
 //! rebuilt.
 
+use std::time::Instant;
+
 use libghostty_vt::color::Rgb;
 use libghostty_vt::unicode;
 
@@ -117,13 +119,15 @@ impl Scene {
     }
 
     /// Fails when the atlas is full; the caller resets it, invalidates every
-    /// scene and builds again.
+    /// scene and builds again. Past `deadline`, rows are left for a later
+    /// build: they stay dirty, and so does the frame.
     pub fn build(
         &mut self,
         frame: &mut Frame,
         overlay: &Overlay<'_>,
         fonts: &Fonts,
         atlas: &mut Atlas,
+        deadline: Option<Instant>,
     ) -> Result<(), Full> {
         if self.rows.len() != frame.rows.len() {
             self.rows.resize_with(frame.rows.len(), RowCache::default);
@@ -139,7 +143,7 @@ impl Scene {
             }
             self.split = split;
         }
-        self.build_rows(frame, split, fonts, atlas)?;
+        let complete = self.build_rows(frame, split, fonts, atlas, deadline)?;
         self.rebuild_all = false;
 
         self.rects.clear();
@@ -159,26 +163,41 @@ impl Scene {
         self.overlay_rects.clear();
         self.overlay_glyphs.clear();
         self.build_overlay(frame, overlay, cursor, fonts, atlas)?;
-        frame.changed = false;
+        frame.changed = !complete;
         Ok(())
     }
 
+    /// Builds the dirty rows, in order, until `deadline`; always at least one,
+    /// so every build makes progress. Returns whether every row is built.
     fn build_rows(
         &mut self,
         frame: &mut Frame,
         split: Option<(u16, u16)>,
         fonts: &Fonts,
         atlas: &mut Atlas,
-    ) -> Result<(), Full> {
+        deadline: Option<Instant>,
+    ) -> Result<bool, Full> {
         let m = fonts.metrics();
+        let mut built = false;
+        let mut complete = true;
         for (y, (row, cache)) in frame.rows.iter_mut().zip(&mut self.rows).enumerate() {
             if !row.dirty && !self.rebuild_all {
                 continue;
             }
-            cache.rects.clear();
-            cache.glyphs.clear();
-            cache.blink_rects.clear();
-            cache.blink_glyphs.clear();
+            let late = built && deadline.is_some_and(|deadline| Instant::now() >= deadline);
+            // A late row keeps showing what it showed, unless the atlas
+            // started over: then its glyphs are gone.
+            if !late || self.rebuild_all {
+                cache.rects.clear();
+                cache.glyphs.clear();
+                cache.blink_rects.clear();
+                cache.blink_glyphs.clear();
+            }
+            if late {
+                row.dirty = true;
+                complete = false;
+                continue;
+            }
             let top = y as f32 * m.cell_height as f32;
             for (x, cell) in row.cells.iter().enumerate() {
                 let left = x as f32 * m.cell_width as f32;
@@ -193,8 +212,9 @@ impl Scene {
             let mut out = |cell: &Cell, g| if cell.style.blink { blink.push(g) } else { glyphs.push(g) };
             push_text(&mut out, &row.cells, [0.0, top], split, None, fonts, atlas)?;
             row.dirty = false;
+            built = true;
         }
-        Ok(())
+        Ok(complete)
     }
 
     fn build_overlay(
@@ -437,10 +457,30 @@ mod tests {
     const FOCUSED: Overlay<'static> = Overlay { focused: true, copy_cursor: None, preedit: "" };
 
     #[test]
+    fn past_the_deadline_rows_wait_for_the_next_build() {
+        let (mut t, fonts, mut atlas, mut scene) = setup();
+        t.write(b"ab\r\ncd\r\nef");
+        let past = Some(Instant::now());
+        let build = |scene: &mut Scene, atlas: &mut Atlas, t: &mut Terminal, deadline| {
+            let mut frame = t.frame();
+            scene.build(&mut frame, &FOCUSED, &fonts, atlas, deadline).expect("room");
+            (scene.glyphs.len(), frame.changed)
+        };
+        assert_eq!(build(&mut scene, &mut atlas, &mut t, past), (2, true), "one row a build");
+        assert_eq!(build(&mut scene, &mut atlas, &mut t, past), (4, true));
+        assert_eq!(build(&mut scene, &mut atlas, &mut t, None), (6, false));
+        // After an atlas reset, rows not built yet show nothing rather than stale glyphs.
+        atlas.reset();
+        scene.invalidate();
+        assert_eq!(build(&mut scene, &mut atlas, &mut t, past), (2, true));
+        assert_eq!(build(&mut scene, &mut atlas, &mut t, None), (6, false));
+    }
+
+    #[test]
     fn builds_one_glyph_per_inked_cell_and_merges_backgrounds() {
         let (mut t, fonts, mut atlas, mut scene) = setup();
         t.write(b"a b\x1b[41m  \x1b[0m");
-        scene.build(&mut t.frame(), &FOCUSED, &fonts, &mut atlas).expect("room");
+        scene.build(&mut t.frame(), &FOCUSED, &fonts, &mut atlas, None).expect("room");
         assert_eq!(scene.glyphs.len(), 2);
         assert_eq!(scene.rects.len(), 2, "the pane's background and one merged red run");
         assert_eq!(scene.rects[1].size[0], 2.0 * fonts.metrics().cell_width as f32);
@@ -451,7 +491,7 @@ mod tests {
     fn blinking_cells_have_batches_of_their_own() {
         let (mut t, fonts, mut atlas, mut scene) = setup();
         t.write(b"ab\x1b[5;4mcd\x1b[0me");
-        scene.build(&mut t.frame(), &FOCUSED, &fonts, &mut atlas).expect("room");
+        scene.build(&mut t.frame(), &FOCUSED, &fonts, &mut atlas, None).expect("room");
         assert_eq!((scene.glyphs.len(), scene.blink_glyphs.len()), (3, 2));
         assert_eq!(scene.blink_rects.len(), 2, "the underlines blink too");
         assert_eq!(scene.rects.len(), 1, "the pane's background");
@@ -463,13 +503,13 @@ mod tests {
     fn rebuilds_only_dirty_rows() {
         let (mut t, fonts, mut atlas, mut scene) = setup();
         t.write(b"one\r\ntwo");
-        scene.build(&mut t.frame(), &FOCUSED, &fonts, &mut atlas).expect("room");
+        scene.build(&mut t.frame(), &FOCUSED, &fonts, &mut atlas, None).expect("room");
         let glyphs = scene.glyphs.clone();
         // Nothing changed: the same instances come back.
-        scene.build(&mut t.frame(), &FOCUSED, &fonts, &mut atlas).expect("room");
+        scene.build(&mut t.frame(), &FOCUSED, &fonts, &mut atlas, None).expect("room");
         assert_eq!(scene.glyphs, glyphs);
         t.write(b"!");
-        scene.build(&mut t.frame(), &FOCUSED, &fonts, &mut atlas).expect("room");
+        scene.build(&mut t.frame(), &FOCUSED, &fonts, &mut atlas, None).expect("room");
         assert_eq!(scene.glyphs.len(), glyphs.len() + 1);
         assert_eq!(scene.glyphs[..3], glyphs[..3]);
     }
@@ -478,12 +518,12 @@ mod tests {
     fn ligatures_break_at_the_cursor_and_join_again_when_it_leaves() {
         let (mut t, fonts, mut atlas, mut scene) = setup();
         t.write(b"a->b");
-        scene.build(&mut t.frame(), &FOCUSED, &fonts, &mut atlas).expect("room");
+        scene.build(&mut t.frame(), &FOCUSED, &fonts, &mut atlas, None).expect("room");
         let joined = scene.glyphs.clone();
         let on_arrow = Overlay { copy_cursor: Some((2, 0)), ..FOCUSED };
-        scene.build(&mut t.frame(), &on_arrow, &fonts, &mut atlas).expect("room");
+        scene.build(&mut t.frame(), &on_arrow, &fonts, &mut atlas, None).expect("room");
         assert_ne!(scene.glyphs, joined, "the cursor's row is shaped again around it");
-        scene.build(&mut t.frame(), &FOCUSED, &fonts, &mut atlas).expect("room");
+        scene.build(&mut t.frame(), &FOCUSED, &fonts, &mut atlas, None).expect("room");
         assert_eq!(scene.glyphs, joined);
     }
 
@@ -491,7 +531,7 @@ mod tests {
     fn preedit_replaces_the_cursor() {
         let (mut t, fonts, mut atlas, mut scene) = setup();
         let overlay = Overlay { focused: true, copy_cursor: None, preedit: "日本" };
-        scene.build(&mut t.frame(), &overlay, &fonts, &mut atlas).expect("room");
+        scene.build(&mut t.frame(), &overlay, &fonts, &mut atlas, None).expect("room");
         assert_eq!(scene.overlay_glyphs.len(), 2);
         // A background and an underline, four cells wide.
         assert_eq!(scene.overlay_rects.len(), 2);
