@@ -356,6 +356,7 @@ Each milestone is one PR. Each must keep the idle rule: no work while nothing ch
 ### M7: Font shaping
 
 - Shape runs with CoreText. Ligatures. Better fallback.
+- Fallback order for a character the family lacks: `font.fallback`, then the embedded Symbols Nerd Font Mono, then CoreText's own choice. CoreText never falls back for the private use area, where most Nerd Font icons live, so without the embedded font they drew as empty boxes.
 
 ### M8: Polish
 
@@ -393,6 +394,7 @@ line_height = 1.0
 bold_weight = "demibold"
 faint_weight = "extralight"
 ligatures = true
+fallback = []                 # families tried first for missing characters
 
 [theme]
 name = "tokyo-night"          # built in; [theme.colors] overrides single colors

@@ -98,3 +98,4 @@ Against WezTerm on an M4 Max, both as shipped and both with my config ([details]
 
 - slutty: [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
 - The bundled JetBrains Mono: [SIL Open Font License](assets/fonts/jetbrains-mono/OFL.txt).
+- The bundled Symbols Nerd Font: [MIT](assets/fonts/symbols-nerd-font/LICENSE); its icon sets keep their own licenses, [listed here](assets/fonts/symbols-nerd-font/README.md).

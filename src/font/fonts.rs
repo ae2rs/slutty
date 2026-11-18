@@ -11,8 +11,8 @@ use objc2_core_foundation::{
 use objc2_core_graphics::{CGColorSpace, kCGColorSpaceSRGB};
 use objc2_core_text::{
     CTFont, CTFontDescriptor, CTFontManagerCreateFontDescriptorFromData, CTFontOrientation, CTFontSymbolicTraits,
-    CTLine, kCTFontAttributeName, kCTFontFamilyNameAttribute, kCTFontFeatureSettingsAttribute,
-    kCTFontOpenTypeFeatureTag, kCTFontOpenTypeFeatureValue, kCTFontWeightTrait,
+    CTLine, kCTFontAttributeName, kCTFontCascadeListAttribute, kCTFontFamilyNameAttribute,
+    kCTFontFeatureSettingsAttribute, kCTFontOpenTypeFeatureTag, kCTFontOpenTypeFeatureValue, kCTFontWeightTrait,
     kCTForegroundColorFromContextAttributeName,
 };
 
@@ -38,6 +38,10 @@ const EMBEDDED: [&[u8]; 6] = [
     include_bytes!("../../assets/fonts/jetbrains-mono/JetBrainsMono-ExtraLight.ttf"),
     include_bytes!("../../assets/fonts/jetbrains-mono/JetBrainsMono-ExtraLightItalic.ttf"),
 ];
+
+/// Nerd Font icons, tried after the configured fallbacks. CoreText's own
+/// fallback never picks a font for the private use area, where most of them are.
+const SYMBOLS: &[u8] = include_bytes!("../../assets/fonts/symbols-nerd-font/SymbolsNerdFontMono-Regular.ttf");
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Weight {
@@ -154,6 +158,10 @@ impl Fonts {
         if !config.ligatures {
             faces = faces.iter().map(|font| without_ligatures(font)).collect();
         }
+        let cascade = cascade(&config.fallback)?;
+        // SAFETY: reading a framework constant.
+        let key = unsafe { kCTFontCascadeListAttribute };
+        faces = faces.iter().map(|font| with_attribute(font, key, cascade.as_ref())).collect();
         Ok(Self {
             faces,
             metrics,
@@ -257,16 +265,38 @@ fn embedded(size: f64) -> Result<Vec<Candidate>, FontError> {
 
 /// Every installed face of `family`.
 fn installed(family: &str, size: f64) -> Vec<Candidate> {
+    let query = family_descriptor(family);
+    // SAFETY: no mandatory attributes; the array holds font descriptors.
+    let Some(found) = (unsafe { query.matching_font_descriptors(None) }) else { return Vec::new() };
+    let found = unsafe { CFRetained::cast_unchecked::<CFArray<CTFontDescriptor>>(found) };
+    found.iter().map(|descriptor| with_style(&descriptor, size)).collect()
+}
+
+fn family_descriptor(family: &str) -> CFRetained<CTFontDescriptor> {
     let name = CFString::from_str(family);
     // SAFETY: reading a framework constant.
     let key = unsafe { kCTFontFamilyNameAttribute };
     let attributes = CFDictionary::<CFString, CFString>::from_slices(&[key], &[&name]);
     // SAFETY: a valid attribute dictionary.
-    let query = unsafe { CTFontDescriptor::with_attributes(attributes.as_opaque()) };
-    // SAFETY: no mandatory attributes; the array holds font descriptors.
-    let Some(found) = (unsafe { query.matching_font_descriptors(None) }) else { return Vec::new() };
-    let found = unsafe { CFRetained::cast_unchecked::<CFArray<CTFontDescriptor>>(found) };
-    found.iter().map(|descriptor| with_style(&descriptor, size)).collect()
+    unsafe { CTFontDescriptor::with_attributes(attributes.as_opaque()) }
+}
+
+/// The fonts CoreText tries, in order, for characters a face lacks: the
+/// configured `families`, then the embedded symbols.
+fn cascade(families: &[String]) -> Result<CFRetained<CFArray<CTFontDescriptor>>, FontError> {
+    let mut descriptors = Vec::new();
+    for family in families {
+        if installed(family, 12.0).is_empty() {
+            return Err(FontError(format!("fallback font family `{family}` is not installed")));
+        }
+        descriptors.push(family_descriptor(family));
+    }
+    let data = CFData::from_bytes(SYMBOLS);
+    // SAFETY: `data` is a valid CFData.
+    let symbols = unsafe { CTFontManagerCreateFontDescriptorFromData(&data) }
+        .ok_or_else(|| FontError("embedded symbols font is invalid".into()))?;
+    descriptors.push(symbols);
+    Ok(CFArray::from_retained_objects(&descriptors))
 }
 
 fn with_style(descriptor: &CTFontDescriptor, size: f64) -> Candidate {
@@ -362,7 +392,12 @@ fn without_ligatures(font: &CTFont) -> CFRetained<CTFont> {
         })
         .collect();
     let features = CFArray::from_retained_objects(&features);
-    let attributes = CFDictionary::<CFString, CFType>::from_slices(&[settings], &[features.as_ref()]);
+    with_attribute(font, settings, features.as_ref())
+}
+
+/// `font` with the font descriptor attribute `key` set to `value`.
+fn with_attribute(font: &CTFont, key: &CFString, value: &CFType) -> CFRetained<CTFont> {
+    let attributes = CFDictionary::<CFString, CFType>::from_slices(&[key], &[value]);
     // SAFETY: a valid attribute dictionary.
     let descriptor = unsafe { CTFontDescriptor::with_attributes(attributes.as_opaque()) };
     // SAFETY: valid font and descriptor; size 0 keeps the font's size and a
@@ -488,6 +523,32 @@ mod tests {
         let menlo = Font { family: "Menlo".into(), ..Font::default() };
         assert!(Fonts::new(&menlo, 32.0).is_ok());
         let missing = Font { family: "No Such Font 42".into(), ..Font::default() };
+        let err = Fonts::new(&missing, 32.0).err().expect("missing");
+        assert!(err.to_string().contains("No Such Font 42"), "{err}");
+    }
+
+    /// The PostScript name of the font the first glyph of `text` comes from.
+    fn font_of(fonts: &Fonts, text: &str) -> String {
+        let glyph = fonts.shape(text, Face::default())[0];
+        // SAFETY: a plain getter.
+        unsafe { fonts.fonts.borrow()[glyph.font.0 as usize].post_script_name() }.to_string()
+    }
+
+    #[test]
+    fn nerd_font_icons_come_from_the_embedded_symbols() {
+        let fonts = fonts(&Font::default());
+        // A folder, in the private use area CoreText never falls back for.
+        assert_eq!(font_of(&fonts, "\u{f115}"), "SymbolsNFM");
+        assert_eq!(font_of(&fonts, "😀"), "AppleColorEmoji", "emoji keep the system's font");
+    }
+
+    #[test]
+    fn configured_fallbacks_come_before_the_symbols() {
+        // Both have ☰.
+        assert_eq!(font_of(&fonts(&Font::default()), "☰"), "SymbolsNFM");
+        let symbols = Font { fallback: vec!["Apple Symbols".into()], ..Font::default() };
+        assert_eq!(font_of(&fonts(&symbols), "☰"), "AppleSymbols");
+        let missing = Font { fallback: vec!["No Such Font 42".into()], ..Font::default() };
         let err = Fonts::new(&missing, 32.0).err().expect("missing");
         assert!(err.to_string().contains("No Such Font 42"), "{err}");
     }

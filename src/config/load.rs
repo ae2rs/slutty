@@ -53,6 +53,7 @@ mod tests {
             family = "JetBrains Mono"
             size = 14
             line_height = 1.1
+            fallback = ["FiraCode Nerd Font Mono"]
             bold_weight = "semibold"
             faint_weight = "light"
 
@@ -81,6 +82,7 @@ mod tests {
         )
         .expect("valid");
         assert_eq!(config.font.size, 14.0);
+        assert_eq!(config.font.fallback, ["FiraCode Nerd Font Mono"]);
         assert!(config.terminal.cursor_blink);
         assert_eq!(config.tab_bar.status, [Stat::Cpu, Stat::Ram, Stat::Net, Stat::Disk]);
         assert!(Config::default().tab_bar.status.is_empty(), "off by default");
