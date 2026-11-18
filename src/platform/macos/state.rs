@@ -177,7 +177,7 @@ fn pump() {
     }
     for window in &pump.redraw {
         if let Some(view) = view(*window) {
-            view.request_frame();
+            view.output_arrived();
         }
     }
     for window in &pump.tabs {
