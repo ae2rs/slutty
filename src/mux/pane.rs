@@ -4,7 +4,7 @@ use std::cell::RefMut;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -91,14 +91,10 @@ pub struct Pane {
 }
 
 impl Pane {
-    /// Starts the login shell in `cwd`, or in the home directory.
-    pub(super) fn spawn(geometry: Geometry, config: &Config, cwd: Option<&Path>, wake: &Wake) -> io::Result<Self> {
+    /// Starts `spawn` with the terminal's environment.
+    pub(super) fn spawn(geometry: Geometry, config: &Config, mut spawn: Spawn, wake: &Wake) -> io::Result<Self> {
         let terminal = Terminal::new(geometry, config).map_err(io::Error::other)?;
-        let mut spawn = Spawn::login_shell();
         spawn.env = shell_env();
-        if let Some(cwd) = cwd.filter(|dir| dir.is_dir()) {
-            spawn.cwd = Some(cwd.to_path_buf());
-        }
         let wake = Arc::clone(wake);
         let pty = Pty::spawn(&spawn, window_size(geometry), move || wake())?;
         let mut pane = Self {

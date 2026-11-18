@@ -7,7 +7,7 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -53,13 +53,23 @@ pub struct Spawn {
 }
 
 impl Spawn {
-    /// The user's login shell from the password database, in their home.
-    pub fn login_shell() -> Self {
+    /// The user's login shell from the password database, in `cwd` when it is
+    /// a directory, else in their home.
+    pub fn login_shell(cwd: Option<&Path>) -> Self {
         let (shell, home) = passwd_entry();
         let program =
             shell.or_else(|| std::env::var_os("SHELL").map(PathBuf::from)).unwrap_or_else(|| PathBuf::from("/bin/zsh"));
-        let cwd = home.or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+        let cwd = cwd
+            .filter(|dir| dir.is_dir())
+            .map(Path::to_path_buf)
+            .or(home)
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
         Self { program, args: Vec::new(), login: true, cwd, env: Vec::new() }
+    }
+
+    /// `program` with `args`, found on `PATH`, in this process's directory.
+    pub fn command(program: PathBuf, args: Vec<OsString>) -> Self {
+        Self { program, args, login: false, cwd: None, env: Vec::new() }
     }
 }
 

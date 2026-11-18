@@ -12,6 +12,7 @@ use super::state::{self, with_app};
 use super::view::TerminalView;
 use crate::keys::Action;
 use crate::mux::Axis;
+use crate::pty::Spawn;
 use crate::terminal::KeyInput;
 
 impl TerminalView {
@@ -78,7 +79,7 @@ impl TerminalView {
             }
             Action::NewWindow => {
                 let cwd = with_app(|app| app.mux.active_cwd(window)).flatten();
-                app::open_window(self.mtm(), cwd.as_deref(), self.window().as_deref());
+                app::open_window(self.mtm(), Spawn::login_shell(cwd.as_deref()), self.window().as_deref());
             }
             Action::PopPane | Action::PopTab => {
                 let popped = with_app(|app| {

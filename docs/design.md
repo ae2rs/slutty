@@ -195,6 +195,7 @@ libghostty-vt is a C library. It turns the bytes a program writes into terminal 
 
 - `openpty`, then `fork`/`exec` through `std::process::Command` with `setsid` and `TIOCSCTTY` in `pre_exec`.
 - Shell from `getpwuid`, started as a login shell (`argv[0]` is `-zsh`), in `$HOME`.
+- `slutty -- <command> [<arg>...]` runs the command in the first window instead, as is, in the current directory, found on `PATH`. New tabs, splits and windows still start the shell. The app quits when the command exits, as the last window closes.
 - Environment: `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=slutty`.
 - Resize with `TIOCSWINSZ`. The kernel sends `SIGWINCH`.
 - EOF on the reader means the child is gone. Reap it with `waitpid`, then close the pane.
