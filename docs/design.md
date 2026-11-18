@@ -143,7 +143,7 @@ libghostty-vt is a C library. It turns the bytes a program writes into terminal 
 ### Glyph atlas
 
 - One RGBA texture, 2048 px square, shelf-packed. Colour emoji keep their colours.
-- When it fills, it starts over and every pane is built again. If it fills again before a whole frame was built, one screen does not fit, as with dense CJK on a big window: the texture doubles, up to 8192 px.
+- When it fills, it starts over and every pane is built again. If it fills again in the same frame, what that frame builds does not fit, as with dense CJK on a big window: the texture doubles, up to 8192 px. A flood's frames, cut short at their deadline, build too little to fill it: during a flood it only starts over.
 - Key: face, glyph id, scale. Rasterised once with CoreText.
 - Rebuilt when the backing scale or font size changes.
 
