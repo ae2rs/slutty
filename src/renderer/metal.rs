@@ -2,6 +2,7 @@ use std::cell::RefMut;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::NonNull;
+use std::time::Instant;
 
 use libghostty_vt::color::Rgb;
 use objc2::rc::Retained;
@@ -76,6 +77,9 @@ pub struct PaneDraw<'a> {
     pub origin: [f32; 2],
     pub overlay: Overlay<'a>,
     pub tint: Tint,
+    /// Rows not built by then wait for a later frame, and the frame stays
+    /// changed. `None` builds them all.
+    pub deadline: Option<Instant>,
 }
 
 pub struct Renderer {
@@ -86,6 +90,9 @@ pub struct Renderer {
     texture: Retained<ProtocolObject<dyn MTLTexture>>,
     fonts: Fonts,
     atlas: Atlas,
+    /// The atlas started over, and no frame has been built whole since: if it
+    /// fills again, one screen does not fit, and it grows.
+    refilling: bool,
     /// The panes drawn last time. Others are dropped and built from
     /// scratch when they show again.
     scenes: HashMap<PaneId, Scene>,
@@ -114,6 +121,7 @@ impl Renderer {
             texture,
             fonts,
             atlas,
+            refilling: false,
             scenes: HashMap::new(),
             chrome: Chrome::default(),
         })
@@ -188,17 +196,19 @@ impl Renderer {
         clear: Option<Rgb>,
     ) -> Packed {
         self.scenes.retain(|id, _| panes.iter().any(|p| p.id == *id));
-        if self.build(panes, chrome).is_err() {
-            log::info!("glyph atlas full; starting over");
-            self.atlas.reset();
-            self.scenes.values_mut().for_each(Scene::invalidate);
-            while self.build(panes, chrome).is_err() {
-                if !self.grow_atlas() {
-                    log::warn!("glyph atlas too small for one screen");
-                    break;
-                }
-                self.scenes.values_mut().for_each(Scene::invalidate);
+        while self.build(panes, chrome).is_err() {
+            if !self.refilling {
+                log::info!("glyph atlas full; starting over");
+                self.atlas.reset();
+                self.refilling = true;
+            } else if !self.grow_atlas() {
+                log::warn!("glyph atlas too small for one screen");
+                break;
             }
+            self.scenes.values_mut().for_each(Scene::invalidate);
+        }
+        if !panes.iter().any(|pane| pane.frame.changed) {
+            self.refilling = false;
         }
         self.upload_glyphs();
 
@@ -229,7 +239,7 @@ impl Renderer {
     fn build(&mut self, panes: &mut [PaneDraw<'_>], chrome: &[Line]) -> Result<(), Full> {
         for pane in panes {
             let scene = self.scenes.entry(pane.id).or_default();
-            scene.build(&mut pane.frame, &pane.overlay, &self.fonts, &mut self.atlas)?;
+            scene.build(&mut pane.frame, &pane.overlay, &self.fonts, &mut self.atlas, pane.deadline)?;
         }
         self.chrome.build(chrome, &self.fonts, &mut self.atlas)
     }
@@ -541,7 +551,14 @@ mod tests {
 
     fn pane<'a>(frame: &'a RefCell<Frame>, tint: Tint) -> PaneDraw<'a> {
         let overlay = Overlay { focused: false, copy_cursor: None, preedit: "" };
-        PaneDraw { id: "1".parse().expect("pane id"), frame: frame.borrow_mut(), origin: [0.0, 0.0], overlay, tint }
+        PaneDraw {
+            id: "1".parse().expect("pane id"),
+            frame: frame.borrow_mut(),
+            origin: [0.0, 0.0],
+            overlay,
+            tint,
+            deadline: None,
+        }
     }
 
     fn pixel(background: Rgb, tint: Tint) -> [u8; 4] {
