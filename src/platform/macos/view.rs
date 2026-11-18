@@ -6,7 +6,7 @@
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::ops::Range;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use libghostty_vt::color::Rgb;
 use libghostty_vt::key::{self, Key, Mods};
@@ -42,6 +42,17 @@ use crate::renderer::{Line, Overlay, PaneDraw, RectInstance, Renderer, Shown, Su
 use crate::status;
 use crate::terminal::{CellStyle, Highlight, KeyInput, MouseInput, SearchStatus};
 
+/// Output this recent makes a flood. A frame can take hundreds of
+/// milliseconds when a screen is full of glyphs never drawn before, and the
+/// main thread that draws also reads the output, so during a flood a frame
+/// builds rows for at most [`FLOOD_BUDGET`] and leaves the rest for later.
+const FLOOD_QUIET: Duration = Duration::from_millis(100);
+const FLOOD_BUDGET: Duration = Duration::from_millis(4);
+/// After a frame left rows unbuilt, the least time to the next, so reading
+/// gets most of the main thread. Finished frames are not held back, so
+/// typing stays at one refresh.
+const UNFINISHED_FRAME: Duration = Duration::from_millis(33);
+
 pub struct Ivars {
     window: WindowId,
     surface: RefCell<Surface>,
@@ -70,6 +81,10 @@ pub struct Ivars {
     /// The stats refresh last made, from [`crate::animation::Phase::status`].
     status_phase: Cell<u64>,
     link: OnceCell<Retained<CADisplayLink>>,
+    /// When a pane in the window last showed new output.
+    output_at: Cell<Option<Instant>>,
+    /// When the last frame was presented, if it left rows for a later one.
+    unfinished_at: Cell<Option<Instant>>,
     layout: Cell<Layout>,
     /// Each tab's cells in the tab bar, for clicks.
     tab_cells: RefCell<Vec<Range<usize>>>,
@@ -151,11 +166,19 @@ define_class!(
 
         #[unsafe(method(step:))]
         fn step(&self, _link: &CADisplayLink) {
-            self.draw();
-            // Damage unpauses the link again; until then nothing runs.
-            if let Some(link) = self.ivars().link.get() {
+            let ivars = self.ivars();
+            let now = Instant::now();
+            // The link keeps running after an unfinished frame, and the next
+            // waits its turn.
+            if ivars.unfinished_at.get().is_some_and(|at| now.duration_since(at) < UNFINISHED_FRAME) {
+                return;
+            }
+            // Damage unpauses the link again, and so does an unfinished frame;
+            // until then nothing runs.
+            if let Some(link) = ivars.link.get() {
                 link.setPaused(true);
             }
+            self.draw();
         }
 
         #[unsafe(method(keyDown:))]
@@ -416,6 +439,8 @@ impl TerminalView {
             shows_status: Cell::new(false),
             status_phase: Cell::new(0),
             link: OnceCell::new(),
+            output_at: Cell::new(None),
+            unfinished_at: Cell::new(None),
             layout: Cell::new(layout),
             tab_cells: RefCell::new(Vec::new()),
             hover_tab: Cell::new(None),
@@ -477,6 +502,17 @@ impl TerminalView {
         if let Some(link) = self.ivars().link.get() {
             link.setPaused(false);
         }
+    }
+
+    /// A pane in the window has new output: draw it, spaced out during a
+    /// flood.
+    pub fn output_arrived(&self) {
+        self.ivars().output_at.set(Some(Instant::now()));
+        self.request_frame();
+    }
+
+    fn flooding(&self, now: Instant) -> bool {
+        self.ivars().output_at.get().is_some_and(|at| now.duration_since(at) < FLOOD_QUIET)
     }
 
     /// Shows the tabs and title as they are now.
@@ -553,6 +589,8 @@ impl TerminalView {
         let layout = ivars.layout.get();
         let overlay_dirty = ivars.overlay_dirty.replace(false);
         let focused = ivars.focused.get();
+        let now = Instant::now();
+        let flooding = self.flooding(now);
         let marked = ivars.marked.borrow();
         let drawn = with_app(|app| {
             let App { mux, renderer, settings, status, .. } = app;
@@ -678,6 +716,7 @@ impl TerminalView {
             }
             let mut cursor = None;
             let mut cursor_blinks = false;
+            let deadline = flooding.then(|| now + FLOOD_BUDGET);
             let mut panes: Vec<PaneDraw<'_>> = visible
                 .into_iter()
                 .map(|(id, rect, frame)| {
@@ -691,7 +730,7 @@ impl TerminalView {
                     let overlay = Overlay { focused: focused && is_active, copy_cursor, preedit };
                     cursor_blinks |= is_active && overlay.cursor_blinks(frame.cursor);
                     let tint = if split && !is_active { INACTIVE } else { Tint::NONE };
-                    PaneDraw { id, frame, origin, overlay, tint }
+                    PaneDraw { id, frame, origin, overlay, tint, deadline }
                 })
                 .collect();
             ivars.cursor_blinks.set(cursor_blinks);
@@ -703,13 +742,21 @@ impl TerminalView {
             ivars.shown.set(shown);
             let surface = &mut ivars.surface.borrow_mut();
             renderer.render(surface, &mut panes, &rects, &chrome, Some(rgb(theme.background)), shown);
+            let pending = panes.iter().any(|pane| pane.frame.changed);
             self.show_strip(renderer, strip);
-            Some((cursor, m))
+            Some((cursor, m, pending))
         })
         .flatten();
         self.note_live();
-        let Some((cursor, m)) = drawn else { return false };
+        let Some((cursor, m, pending)) = drawn else { return false };
         log::trace!("frame presented");
+        // Rows left past a flood's deadline go in a later frame. Outside a
+        // flood only a full atlas leaves rows, and retrying would never idle.
+        let unfinished = pending && flooding;
+        ivars.unfinished_at.set(unfinished.then_some(now));
+        if unfinished {
+            self.request_frame();
+        }
         if let Some([x, y]) = cursor {
             let s = self.window().map_or(1.0, |w| w.backingScaleFactor());
             ivars.cursor_rect.set(NSRect::new(

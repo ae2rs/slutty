@@ -109,7 +109,7 @@ libghostty-vt is a C library. It turns the bytes a program writes into terminal 
 
 - libghostty-vt parses at GB/s. Parsing on the main thread is cheap.
 - One owner means no lock and no `unsafe impl Send`.
-- If profiling shows input lag under heavy output, move the mux to its own thread. The rule above (no AppKit in the mux) keeps that move small.
+- Drawing can be slow, though: a screen of glyphs never seen before costs ~235 ms of CoreText shaping and rasterising (267×66 CJK cells). Floods keep reading fast with fewer and bounded frames (below). If that is not enough, move the mux to its own thread. The rule above (no AppKit in the mux) keeps that move small.
 
 ## Rendering
 
@@ -121,6 +121,15 @@ libghostty-vt is a C library. It turns the bytes a program writes into terminal 
   - After a frame with no new damage, it pauses again.
   - So a burst of output costs at most one frame per refresh, and idle costs nothing.
 - Each frame: update the render state, rebuild instance data for dirty rows only, draw, `clean()`.
+
+### Floods
+
+- A window is flooding while its panes showed new output in the last 100 ms.
+- During a flood, a frame builds rows for at most 4 ms, and always at least one row.
+  - The rest wait: they stay dirty and keep showing their old content, or nothing if the atlas started over.
+  - After such an unfinished frame, the next comes 33 ms later, not at the next refresh. The link keeps running until then.
+  - A finished frame holds nothing back, so typing stays at one refresh.
+- Once output stops for 100 ms, a frame builds every row left.
 
 ### Pipeline
 
@@ -134,7 +143,7 @@ libghostty-vt is a C library. It turns the bytes a program writes into terminal 
 ### Glyph atlas
 
 - One RGBA texture, 2048 px square, shelf-packed. Colour emoji keep their colours.
-- When it fills, it starts over and every pane is built again. If one screen still does not fit, as with dense CJK on a big window, the texture doubles, up to 8192 px.
+- When it fills, it starts over and every pane is built again. If it fills again before a whole frame was built, one screen does not fit, as with dense CJK on a big window: the texture doubles, up to 8192 px.
 - Key: face, glyph id, scale. Rasterised once with CoreText.
 - Rebuilt when the backing scale or font size changes.
 
