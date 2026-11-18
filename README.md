@@ -82,7 +82,11 @@ leader = "ctrl+s"
 
 ## Performance
 
-slutty against WezTerm on throughput, idle CPU and memory: [docs/benchmarks.md](docs/benchmarks.md).
+Against WezTerm on an M4 Max, with the same config ([details](docs/benchmarks.md)):
+
+- **Throughput:** 1.2–4.9× faster on every vtebench test.
+- **Idle:** no CPU and no wake-ups at a still screen.
+- **Memory:** 187 MB at launch against 380 MB; 421 MB against 675 MB with 100 000 lines of scrollback.
 
 ## Design
 
