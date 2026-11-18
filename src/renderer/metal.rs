@@ -90,9 +90,6 @@ pub struct Renderer {
     texture: Retained<ProtocolObject<dyn MTLTexture>>,
     fonts: Fonts,
     atlas: Atlas,
-    /// The atlas started over, and no frame has been built whole since: if it
-    /// fills again, one screen does not fit, and it grows.
-    refilling: bool,
     /// The panes drawn last time. Others are dropped and built from
     /// scratch when they show again.
     scenes: HashMap<PaneId, Scene>,
@@ -121,7 +118,6 @@ impl Renderer {
             texture,
             fonts,
             atlas,
-            refilling: false,
             scenes: HashMap::new(),
             chrome: Chrome::default(),
         })
@@ -196,19 +192,20 @@ impl Renderer {
         clear: Option<Rgb>,
     ) -> Packed {
         self.scenes.retain(|id, _| panes.iter().any(|p| p.id == *id));
-        while self.build(panes, chrome).is_err() {
-            if !self.refilling {
-                log::info!("glyph atlas full; starting over");
-                self.atlas.reset();
-                self.refilling = true;
-            } else if !self.grow_atlas() {
-                log::warn!("glyph atlas too small for one screen");
-                break;
-            }
+        if self.build(panes, chrome).is_err() {
+            log::info!("glyph atlas full; starting over");
+            self.atlas.reset();
             self.scenes.values_mut().for_each(Scene::invalidate);
-        }
-        if !panes.iter().any(|pane| pane.frame.changed) {
-            self.refilling = false;
+            // Full again in the same frame: what this frame builds does not
+            // fit. A frame cut short by its deadline builds little, so it only
+            // grows the atlas when that little does not fit.
+            while self.build(panes, chrome).is_err() {
+                if !self.grow_atlas() {
+                    log::warn!("glyph atlas too small for one screen");
+                    break;
+                }
+                self.scenes.values_mut().for_each(Scene::invalidate);
+            }
         }
         self.upload_glyphs();
 
@@ -486,7 +483,8 @@ mod tests {
     use objc2_metal::MTLStorageMode;
 
     use super::*;
-    use crate::terminal::{Cell, CellStyle, Cursor, CursorShape, Grapheme, Row};
+    use crate::config::Config;
+    use crate::terminal::{Cell, CellStyle, Cursor, CursorShape, Geometry, Grapheme, Row, Terminal};
 
     /// A renderer drawing into a small texture that tests read back.
     struct Offscreen {
@@ -613,4 +611,40 @@ mod tests {
         let near = |got: u8, want: u8| got.abs_diff(want) <= 1;
         assert!(near(r, 100) && near(g, 60) && near(b, 60), "got {r}, {g}, {b}");
     }
+
+    #[test]
+    fn budgeted_frames_full_of_new_glyphs_do_not_grow_the_atlas() {
+        let mut offscreen = Offscreen::new();
+        let (start, generation) = (offscreen.renderer.atlas.size(), offscreen.renderer.atlas.generation());
+        let geometry = Geometry { cols: 40, rows: 10, cell_width: 20, cell_height: 40 };
+        let mut t = Terminal::new(geometry, &Config::default()).expect("terminal");
+        let id = "1".parse().expect("pane id");
+        let mut chars = '\u{4e00}'..='\u{9fff}';
+        // Each frame redraws the whole screen, and a deadline already passed
+        // builds only its top row: 20 new glyphs, 10 000 in all, about twice
+        // what a 2048 px atlas holds. No frame is finished.
+        for i in 0..500 {
+            let top: String = chars.by_ref().take(20).collect();
+            t.write(format!("\x1b[H{top}{}", format!("\r\n{i}").repeat(9)).as_bytes());
+            let overlay = Overlay { focused: false, copy_cursor: None, preedit: "" };
+            let deadline = Some(Instant::now());
+            offscreen.prepare(&mut [PaneDraw {
+                id,
+                frame: t.frame(),
+                origin: [0.0, 0.0],
+                overlay,
+                tint: Tint::NONE,
+                deadline,
+            }]);
+        }
+        assert!(offscreen.renderer.atlas.generation() > generation + 1, "the atlas filled more than once");
+        assert_eq!(offscreen.renderer.atlas.size(), start, "one screen fits; the atlas only starts over");
+        // Once the flood is over, a frame with no deadline builds the rest.
+        let overlay = Overlay { focused: false, copy_cursor: None, preedit: "" };
+        let mut panes =
+            [PaneDraw { id, frame: t.frame(), origin: [0.0, 0.0], overlay, tint: Tint::NONE, deadline: None }];
+        offscreen.prepare(&mut panes);
+        assert!(!panes[0].frame.changed, "the screen is complete");
+    }
+
 }
