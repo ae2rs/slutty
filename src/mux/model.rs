@@ -4,7 +4,6 @@
 use std::cell::RefMut;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -13,6 +12,7 @@ use super::tree::{Axis, Direction, Layout, Rect};
 use super::window::{Tab, Window};
 use super::{PaneId, WindowId};
 use crate::config::Config;
+use crate::pty::Spawn;
 use crate::terminal::{Frame, Geometry, Notification};
 
 /// What changed since the last pump, for the windows to show.
@@ -59,9 +59,9 @@ impl Mux {
         Self { panes: BTreeMap::new(), windows: BTreeMap::new(), next_id: 0, wake: Arc::new(wake), buf: Vec::new() }
     }
 
-    /// Opens a window with one tab running the login shell in `cwd`.
-    pub fn open_window(&mut self, size: Geometry, config: &Config, cwd: Option<&Path>) -> io::Result<WindowId> {
-        let pane = self.spawn(size, config, cwd)?;
+    /// Opens a window with one tab running `spawn`.
+    pub fn open_window(&mut self, size: Geometry, config: &Config, spawn: Spawn) -> io::Result<WindowId> {
+        let pane = self.spawn(size, config, spawn)?;
         let id = WindowId(self.next_id());
         self.windows.insert(id, Window::new(Tab::new(pane), size));
         Ok(id)
@@ -81,7 +81,7 @@ impl Mux {
         let Some(w) = self.windows.get(&window) else { return Ok(()) };
         let size = w.size;
         let cwd = self.cwd(w.active_tab().active);
-        let pane = self.spawn(size, config, cwd.as_deref())?;
+        let pane = self.spawn(size, config, Spawn::login_shell(cwd.as_deref()))?;
         self.change_focus(window, |w| w.push(Tab::new(pane)));
         Ok(())
     }
@@ -115,7 +115,7 @@ impl Mux {
         let Some(w) = self.windows.get(&window) else { return Ok(()) };
         let active = w.active_tab().active;
         let cwd = self.cwd(active);
-        let pane = self.spawn(w.size, config, cwd.as_deref())?;
+        let pane = self.spawn(w.size, config, Spawn::login_shell(cwd.as_deref()))?;
         self.change_focus(window, |w| {
             let tab = w.active_tab_mut();
             tab.zoomed = false;
@@ -414,8 +414,8 @@ impl Mux {
         id
     }
 
-    fn spawn(&mut self, size: Geometry, config: &Config, cwd: Option<&Path>) -> io::Result<PaneId> {
-        let pane = Pane::spawn(size, config, cwd, &self.wake)?;
+    fn spawn(&mut self, size: Geometry, config: &Config, spawn: Spawn) -> io::Result<PaneId> {
+        let pane = Pane::spawn(size, config, spawn, &self.wake)?;
         let id = PaneId(self.next_id());
         self.panes.insert(id, pane);
         Ok(id)

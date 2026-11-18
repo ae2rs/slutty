@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use objc2::rc::Retained;
@@ -19,6 +19,7 @@ use super::view::TerminalView;
 use crate::config::{self, Config};
 use crate::font::Fonts;
 use crate::mux::{Mux, WindowId};
+use crate::pty::Spawn;
 use crate::renderer::Renderer;
 
 define_class!(
@@ -69,8 +70,8 @@ fn load_settings(path: Option<PathBuf>) -> Settings {
     Settings { config, path, error }
 }
 
-/// Opens one terminal window and runs the AppKit event loop.
-pub fn run(config_path: Option<PathBuf>) -> ExitCode {
+/// Opens one terminal window running `first` and runs the AppKit event loop.
+pub fn run(config_path: Option<PathBuf>, first: Spawn) -> ExitCode {
     let Some(mtm) = MainThreadMarker::new() else {
         log::error!("slutty must start on the main thread");
         return ExitCode::FAILURE;
@@ -100,7 +101,7 @@ pub fn run(config_path: Option<PathBuf>) -> ExitCode {
     App::start(Mux::new(state::wake_from_any_thread), renderer, settings, scale);
 
     notify::start();
-    if !open_window(mtm, None, None) {
+    if !open_window(mtm, first, None) {
         return ExitCode::FAILURE;
     }
     app.activate();
@@ -108,14 +109,14 @@ pub fn run(config_path: Option<PathBuf>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Opens a window with one tab running the login shell in `cwd`, cascaded
-/// from `after` or else centered. Returns whether it opened.
-pub(super) fn open_window(mtm: MainThreadMarker, cwd: Option<&Path>, after: Option<&NSWindow>) -> bool {
+/// Opens a window with one tab running `spawn`, cascaded from `after` or
+/// else centered. Returns whether it opened.
+pub(super) fn open_window(mtm: MainThreadMarker, spawn: Spawn, after: Option<&NSWindow>) -> bool {
     let opened = with_app(|app| {
         let m = app.renderer.metrics();
         let size = layout::content_size(app.config(), m, app.scale, app.tab_bar);
         let layout = Layout::new(size, app.scale, m, app.config().window.padding, app.tab_bar);
-        let id = app.mux.open_window(layout.area, &app.settings.config, cwd)?;
+        let id = app.mux.open_window(layout.area, &app.settings.config, spawn)?;
         Ok::<_, std::io::Error>((id, size))
     });
     match opened {
@@ -124,7 +125,7 @@ pub(super) fn open_window(mtm: MainThreadMarker, cwd: Option<&Path>, after: Opti
             true
         }
         Some(Err(err)) => {
-            log::error!("starting the shell failed: {err}");
+            log::error!("starting the program failed: {err}");
             false
         }
         None => false,
