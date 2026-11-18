@@ -237,6 +237,8 @@ impl Terminal {
         let theme = &config.theme;
         self.vt
             .set_scrollback_max_lines(Some(config.terminal.scrollback_lines))?
+            // The default byte limit keeps one page, about 200 rows: lines alone bound it.
+            .set_scrollback_max_bytes(Some(usize::MAX))?
             .set_terminfo_name("xterm-256color")?
             .set_default_fg_color(Some(rgb(theme.foreground)))?
             .set_default_bg_color(Some(rgb(theme.background)))?
@@ -519,6 +521,20 @@ mod tests {
     fn terminal() -> Terminal {
         let geometry = Geometry { cols: 10, rows: 3, cell_width: 8, cell_height: 16 };
         Terminal::new(geometry, &Config::default()).expect("terminal")
+    }
+
+    #[test]
+    fn scrollback_keeps_the_configured_lines() {
+        let mut config = Config::default();
+        config.terminal.scrollback_lines = 2000;
+        let geometry = Geometry { cols: 80, rows: 24, cell_width: 8, cell_height: 16 };
+        let mut t = Terminal::new(geometry, &config).expect("terminal");
+        let text: String =
+            (0..6000).map(|i| format!("{i:06} the quick brown fox jumps over the lazy dog\r\n")).collect();
+        t.write(text.as_bytes());
+        let kept = t.vt.scrollback_rows().expect("scrollback rows");
+        // libghostty prunes whole pages, so it lands within a page of the limit.
+        assert!((1500..2500).contains(&kept), "kept {kept} rows");
     }
 
     fn row_text(t: &mut Terminal, y: usize) -> String {
