@@ -1,0 +1,53 @@
+Processes: 1238 total, 2 running, 1236 sleeping, 5298 threads 
+2026/11/18 12:07:30
+Load Avg: 2.85, 3.38, 2.85 
+CPU usage: 9.39% user, 7.41% sys, 83.19% idle 
+SharedLibs: 1012M resident, 191M data, 237M linkedit.
+MemRegions: 432682 total, 8918M resident, 619M private, 10G shared.
+PhysMem: 43G used (5060M wired, 11G compressor), 3801M unused.
+VM: 503T vsize, 6144M framework vsize, 7907336(0) swapins, 10961663(0) swapouts.
+Networks: packets: 1756879321/2218G in, 1322986560/1689G out.
+Disks: 2371186951/34T read, 952697866/36T written.
+
+PID    %CPU IDLEW TIME    
+94577  0.0  0     00:00.10
+Processes: 1239 total, 6 running, 1233 sleeping, 5772 threads 
+2026/11/18 12:07:50
+Load Avg: 2.85, 3.35, 2.86 
+CPU usage: 3.69% user, 1.98% sys, 94.32% idle 
+SharedLibs: 1012M resident, 191M data, 237M linkedit.
+MemRegions: 132 total, 8304K resident, 619M private, 10G shared.
+PhysMem: 44G used (5144M wired, 11G compressor), 3445M unused.
+VM: 504T vsize, 6144M framework vsize, 7907336(0) swapins, 10961663(0) swapouts.
+Networks: packets: 1756881105/2218G in, 1322986788/1689G out.
+Disks: 2371187183/34T read, 952699256/36T written.
+
+PID    %CPU IDLEW TIME    
+94577  0.0  0     00:00.10
+Processes: 1238 total, 4 running, 1234 sleeping, 5262 threads 
+2026/11/18 12:08:10
+Load Avg: 2.38, 3.21, 2.82 
+CPU usage: 4.5% user, 1.95% sys, 93.98% idle 
+SharedLibs: 1012M resident, 191M data, 237M linkedit.
+MemRegions: 0 total, 0B resident, 619M private, 10G shared.
+PhysMem: 43G used (4964M wired, 11G compressor), 4084M unused.
+VM: 503T vsize, 6144M framework vsize, 7907336(0) swapins, 10961663(0) swapouts.
+Networks: packets: 1756882600/2218G in, 1322987070/1689G out.
+Disks: 2371187295/34T read, 952699989/36T written.
+
+PID    %CPU IDLEW TIME    
+94577  0.0  0     00:00.10
+Processes: 1236 total, 3 running, 1233 sleeping, 5274 threads 
+2026/11/18 12:08:30
+Load Avg: 1.97, 3.07, 2.77 
+CPU usage: 5.13% user, 2.48% sys, 92.37% idle 
+SharedLibs: 1012M resident, 191M data, 237M linkedit.
+MemRegions: 0 total, 0B resident, 619M private, 10G shared.
+PhysMem: 43G used (5147M wired, 11G compressor), 3821M unused.
+VM: 502T vsize, 6144M framework vsize, 7907336(0) swapins, 10961663(0) swapouts.
+Networks: packets: 1756885382/2218G in, 1322987298/1689G out.
+Disks: 2371187328/34T read, 952700879/36T written.
+
+PID    %CPU IDLEW TIME    
+94577  0.0  0     00:00.10
+cpu time:   0:00.10 ->   0:00.10
