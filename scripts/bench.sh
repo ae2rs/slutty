@@ -177,10 +177,12 @@ done)
 aerospace move-workspace-to-monitor --workspace "$bench_ws" main
 trap 'aerospace workspace "$home_ws"; osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $home_app) to true" > /dev/null || true' EXIT
 
+# Before the results below change: they are tracked and would read as dirty.
+version=$(git describe --always --dirty)
 {
     echo "machine: $(sysctl -n hw.model), $(sysctl -n machdep.cpu.brand_string), $(sysctl -n hw.memsize | awk '{ print $1 / 2^30 }') GB"
     echo "macOS: $(sw_vers -productVersion)"
-    echo "slutty: $(git describe --always --dirty)"
+    echo "slutty: $version"
     echo "wezterm: $(wezterm --version)"
     echo "vtebench: $(vtebench --version)"
 } > "$out/machine.txt"
