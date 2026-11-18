@@ -2,6 +2,8 @@
 
 A fast, native macOS terminal emulator and multiplexer, built on [libghostty-vt](https://lib.ghostty.org/vt/).
 
+![slutty running rho, with the tab bar and its stats](docs/screenshot.png)
+
 - **Native.** AppKit window, Metal drawing, CoreText shaping, system input methods.
 - **Idle when idle.** Draws only what changed. No polling, no timers while nothing moves.
 - **A multiplexer built in.** Windows, tabs, splits, zoom, copy mode, search, quick select.
