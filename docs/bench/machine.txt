@@ -1,5 +1,5 @@
 machine: Mac16,5, Apple M4 Max, 48 GB
 macOS: 26.6.2
-slutty: 60963a4
+slutty: 6885bb0
 wezterm: wezterm 20260909-081506-9fa147c9
 vtebench: vtebench 0.3.1

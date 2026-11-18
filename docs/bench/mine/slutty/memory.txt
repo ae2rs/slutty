@@ -1,2 +1,2 @@
-launch: footprint 187 MB, rss 89952 KB
-full scrollback: footprint 421 MB, rss 316304 KB
+launch: footprint 401 MB, rss 94640 KB
+full scrollback: footprint 625 MB, rss 277424 KB
