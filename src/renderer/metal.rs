@@ -17,7 +17,7 @@ use objc2_metal::{
 };
 use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer, kCAGravityTopLeft};
 
-use super::atlas::{ATLAS_SIZE, Atlas, Full};
+use super::atlas::{Atlas, Full, MAX_SIZE};
 use super::scene::{Chrome, GlyphInstance, Line, Overlay, RectInstance, Scene};
 use crate::font::{Fonts, Metrics};
 use crate::mux::PaneId;
@@ -103,17 +103,8 @@ impl Renderer {
         let rect_pipeline = pipeline(&device, &library, "rect_vertex", "rect_fragment")?;
         let glyph_pipeline = pipeline(&device, &library, "glyph_vertex", "glyph_fragment")?;
 
-        // SAFETY: valid format and size.
-        let descriptor = unsafe {
-            MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
-                MTLPixelFormat::RGBA8Unorm,
-                ATLAS_SIZE as usize,
-                ATLAS_SIZE as usize,
-                false,
-            )
-        };
-        descriptor.setUsage(MTLTextureUsage::ShaderRead);
-        let texture = device.newTextureWithDescriptor(&descriptor).ok_or_else(|| err("no atlas texture"))?;
+        let atlas = Atlas::default();
+        let texture = atlas_texture(&device, atlas.size()).ok_or_else(|| err("no atlas texture"))?;
 
         Ok(Self {
             device,
@@ -122,7 +113,7 @@ impl Renderer {
             glyph_pipeline,
             texture,
             fonts,
-            atlas: Atlas::default(),
+            atlas,
             scenes: HashMap::new(),
             chrome: Chrome::default(),
         })
@@ -201,8 +192,12 @@ impl Renderer {
             log::info!("glyph atlas full; starting over");
             self.atlas.reset();
             self.scenes.values_mut().for_each(Scene::invalidate);
-            if self.build(panes, chrome).is_err() {
-                log::warn!("glyph atlas too small for one screen");
+            while self.build(panes, chrome).is_err() {
+                if !self.grow_atlas() {
+                    log::warn!("glyph atlas too small for one screen");
+                    break;
+                }
+                self.scenes.values_mut().for_each(Scene::invalidate);
             }
         }
         self.upload_glyphs();
@@ -237,6 +232,23 @@ impl Renderer {
             scene.build(&mut pane.frame, &pane.overlay, &self.fonts, &mut self.atlas)?;
         }
         self.chrome.build(chrome, &self.fonts, &mut self.atlas)
+    }
+
+    /// Doubles the atlas, emptied. Returns whether it grew: not past
+    /// [`MAX_SIZE`], and only if Metal gave the texture.
+    fn grow_atlas(&mut self) -> bool {
+        let size = self.atlas.size() * 2;
+        if size > MAX_SIZE {
+            return false;
+        }
+        let Some(texture) = atlas_texture(&self.device, size) else {
+            log::warn!("no {size}px glyph atlas texture");
+            return false;
+        };
+        log::info!("glyph atlas grown to {size}px");
+        self.texture = texture;
+        self.atlas.reset_to(size);
+        true
     }
 
     fn upload_glyphs(&mut self) {
@@ -436,6 +448,21 @@ fn pipeline(
     device
         .newRenderPipelineStateWithDescriptor_error(&descriptor)
         .map_err(|e| err(&format!("pipeline: {}", e.localizedDescription())))
+}
+
+/// An RGBA glyph atlas texture `size` pixels wide and high.
+fn atlas_texture(device: &Device, size: u32) -> Option<Retained<ProtocolObject<dyn MTLTexture>>> {
+    // SAFETY: valid format and size.
+    let descriptor = unsafe {
+        MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+            MTLPixelFormat::RGBA8Unorm,
+            size as usize,
+            size as usize,
+            false,
+        )
+    };
+    descriptor.setUsage(MTLTextureUsage::ShaderRead);
+    device.newTextureWithDescriptor(&descriptor)
 }
 
 fn err(message: &str) -> RenderError {
