@@ -1,14 +1,15 @@
 #!/bin/sh
 # Compares slutty with WezTerm: vtebench throughput, idle CPU and wake-ups,
 # and memory at launch and with a full scrollback. Two setups:
-# - defaults: both terminals as shipped, with the same font size, window size
-#   and scrollback;
-# - mine: both with the user's own config, same window size.
-# Writes raw results to docs/bench/<setup>/<terminal>/ and prints a summary.
-# With --screenshot, also captures docs/screenshot.png.
+# - defaults: both terminals as shipped, with the same font size and
+#   scrollback;
+# - mine: both with the user's own config.
+# Each window runs alone on an empty AeroSpace workspace, so it fills the
+# screen and has focus. Writes raw results to docs/bench/<setup>/<terminal>/
+# and prints a summary. With --screenshot, also captures docs/screenshot.png.
 #
-# Every run opens a window that takes focus: start it, then leave the Mac
-# alone until it ends (about 20 minutes).
+# Every run takes focus: start it, then leave the Mac alone until it ends
+# (about 20 minutes). It stops if the keyboard or mouse is used.
 # Usage: scripts/bench.sh [--screenshot] [defaults|mine]...
 set -eu
 
@@ -17,29 +18,27 @@ root=$(pwd)
 out=$root/docs/bench
 work=$root/target/bench
 vte=$work/vtebench
-cols=100
-rows=30
 scrollback=100000
 
-# Starts terminal $1 in setup $setup running `sh -c "$2"`, and sets $launcher
-# to the process it started.
+# Starts terminal $1 in setup $setup running `sh -c "$2"` once the window is
+# placed, and sets $launcher to the process it started.
 start() {
-    rm -f "$work/ready"
+    rm -f "$work/ready" "$work/go"
+    command="while [ ! -e '$work/go' ]; do sleep 0.2; done; stty size > '$dir/size.txt'; $2"
     case $1-$setup in
     slutty-defaults)
         # An empty config directory: slutty's defaults.
-        XDG_CONFIG_HOME=$work/config target/release/slutty -- sh -c "$2" &
+        XDG_CONFIG_HOME=$work/config target/release/slutty -- sh -c "$command" &
         ;;
     slutty-mine)
-        target/release/slutty -- sh -c "$2" &
+        target/release/slutty -- sh -c "$command" &
         ;;
     wezterm-defaults)
-        wezterm -n --config font_size=16 --config initial_cols=$cols --config initial_rows=$rows \
-            --config scrollback_lines=$scrollback start --always-new-process -- sh -c "$2" &
+        wezterm -n --config font_size=16 --config scrollback_lines=$scrollback \
+            start --always-new-process -- sh -c "$command" &
         ;;
     wezterm-mine)
-        wezterm --config initial_cols=$cols --config initial_rows=$rows \
-            start --always-new-process -- sh -c "$2" &
+        wezterm start --always-new-process -- sh -c "$command" &
         ;;
     *)
         echo "unknown terminal or setup: $1 $setup" >&2
@@ -47,10 +46,35 @@ start() {
         ;;
     esac
     launcher=$!
+    place
 }
 
-# Waits up to 10 minutes for the started command to touch $work/ready, then
-# sets $pid to the process that draws.
+# Moves the started terminal's window alone onto the empty workspace $bench_ws
+# and focuses it, then lets its command run. A window opened from a script is
+# not made key, and AeroSpace would tile it beside others. Sets $pid to the
+# process that draws.
+place() {
+    i=0
+    while :; do
+        pid=$(pgrep -P "$launcher" wezterm-gui || echo "$launcher")
+        window=$(aerospace list-windows --all --format '%{window-id} %{app-pid}' | awk -v pid="$pid" '$2 == pid { print $1; exit }')
+        [ -z "$window" ] || break
+        i=$((i + 1))
+        if [ $i -gt 60 ]; then
+            echo "no window for $pid" >&2
+            stop
+            exit 1
+        fi
+        sleep 0.5
+    done
+    aerospace move-node-to-workspace --window-id "$window" "$bench_ws"
+    aerospace workspace "$bench_ws"
+    aerospace focus --window-id "$window"
+    sleep 2
+    touch "$work/go"
+}
+
+# Waits up to 10 minutes for the command to touch $work/ready.
 await() {
     i=0
     until [ -e "$work/ready" ]; do
@@ -62,7 +86,6 @@ await() {
         fi
         sleep 1
     done
-    pid=$(pgrep -P "$launcher" wezterm-gui || echo "$launcher")
 }
 
 # Ends the started terminal, whether or not it closed by itself.
@@ -73,6 +96,16 @@ stop() {
     sleep 2
 }
 
+# Stops the batch if someone used the keyboard or mouse in the last minute:
+# each run takes focus.
+away() {
+    idle=$(ioreg -c IOHIDSystem | awk '/HIDIdleTime/ { print int($NF / 1e9); exit }')
+    if [ "$idle" -lt 60 ]; then
+        echo "input $idle s ago: someone is at the Mac, stopping" >&2
+        exit 1
+    fi
+}
+
 # Physical footprint and resident size of $pid, in one line.
 memory() {
     footprint=$(footprint -p "$pid" | sed -n 's/.*Footprint: \(.*\) (.*/\1/p')
@@ -80,7 +113,7 @@ memory() {
 }
 
 throughput() {
-    start "$1" "stty size > '$dir/size.txt'; vtebench -b '$vte/benchmarks' --dat '$dir/vtebench.dat'; touch '$work/ready'"
+    start "$1" "vtebench -b '$vte/benchmarks' --dat '$dir/vtebench.dat'; touch '$work/ready'"
     await
     stop
 }
@@ -107,27 +140,27 @@ scrollback() {
 }
 
 # slutty with the user's config, a git log on the left and nvim on the right.
-# The split and nvim need synthetic keys; without Accessibility access the
-# shot has one pane.
+# The split and nvim are typed with synthetic keys, only while slutty has
+# focus; without Accessibility access the shot has one pane.
 screenshot() {
     setup=mine
+    dir=$work
     start slutty "clear; git log --graph --oneline --decorate --color -24; touch '$work/ready'; exec zsh -i"
     await
     sleep 2
-    keys() { osascript -e "tell application \"System Events\" to $1" 2> /dev/null || true; }
-    keys 'keystroke "s" using control down'
-    keys 'keystroke "v"'
-    sleep 1
-    keys 'keystroke "nvim src/main.rs"'
-    keys 'key code 36'
-    sleep 3
-    window=$(aerospace list-windows --all --format '%{window-id} %{app-pid}' | awk -v pid="$pid" '$2 == pid { print $1; exit }')
-    if [ -n "$window" ]; then
-        screencapture -x -o -l "$window" "$root/docs/screenshot.png"
-        echo "captured docs/screenshot.png"
+    if [ "$(aerospace list-windows --focused --format '%{app-pid}')" = "$pid" ]; then
+        keys() { osascript -e "tell application \"System Events\" to $1" 2> /dev/null || true; }
+        keys 'keystroke "s" using control down'
+        keys 'keystroke "v"'
+        sleep 1
+        keys 'keystroke "nvim src/main.rs"'
+        keys 'key code 36'
+        sleep 3
     else
-        echo "no slutty window found for the screenshot" >&2
+        echo "slutty lost focus; the screenshot has one pane" >&2
     fi
+    screencapture -x -o -l "$window" "$root/docs/screenshot.png"
+    echo "captured docs/screenshot.png"
     stop
 }
 
@@ -149,6 +182,12 @@ setups=${*:-defaults mine}
 command -v vtebench > /dev/null || cargo install --locked vtebench
 cargo build --release --locked
 mkdir -p "$work/config" "$out"
+home_ws=$(aerospace list-workspaces --focused)
+bench_ws=$(for ws in $(aerospace list-workspaces --all); do
+    [ -n "$(aerospace list-windows --workspace "$ws")" ] || { echo "$ws"; break; }
+done)
+[ -n "$bench_ws" ] || { echo "no empty AeroSpace workspace" >&2; exit 1; }
+trap 'aerospace workspace "$home_ws"' EXIT
 
 {
     echo "machine: $(sysctl -n hw.model), $(sysctl -n machdep.cpu.brand_string), $(sysctl -n hw.memsize | awk '{ print $1 / 2^30 }') GB"
@@ -163,12 +202,14 @@ for setup in $setups; do
         dir=$out/$setup/$terminal
         mkdir -p "$dir"
         for run in throughput idle scrollback; do
+            away
             echo "$setup $terminal: $run"
             $run $terminal
         done
     done
 done
 if $shot; then
+    away
     screenshot
 fi
 
