@@ -191,7 +191,10 @@ impl Renderer {
         chrome: &[Line],
         clear: Option<Rgb>,
     ) -> Packed {
-        self.scenes.retain(|id, _| panes.iter().any(|p| p.id == *id));
+        // Drawing only the strip says nothing about which panes show.
+        if !panes.is_empty() {
+            self.scenes.retain(|id, _| panes.iter().any(|p| p.id == *id));
+        }
         if self.build(panes, chrome).is_err() {
             log::info!("glyph atlas full; starting over");
             self.atlas.reset();
@@ -647,4 +650,13 @@ mod tests {
         assert!(!panes[0].frame.changed, "the screen is complete");
     }
 
+    #[test]
+    fn drawing_the_strip_keeps_the_panes_built() {
+        let mut offscreen = Offscreen::new();
+        let frame = blank_frame(Rgb { r: 0, g: 0, b: 0 });
+        let id = pane(&frame, Tint::NONE).id;
+        offscreen.prepare(&mut [pane(&frame, Tint::NONE)]);
+        offscreen.prepare(&mut []);
+        assert!(offscreen.renderer.scenes.contains_key(&id));
+    }
 }
