@@ -4,13 +4,12 @@
 # - defaults: both terminals as shipped, with the same font size and
 #   scrollback;
 # - mine: both with the user's own config.
-# Each window runs alone on an empty AeroSpace workspace, so it fills the
-# screen. It is not key: macOS does not activate an app a script started, so
-# idle numbers are for an unfocused window. Writes raw results to
+# Each window runs alone and in front on an empty AeroSpace workspace of the
+# main monitor, so it fills the same screen every time. Writes raw results to
 # docs/bench/<setup>/<terminal>/ and prints a summary.
 #
 # Every run raises a window: start it, then leave the Mac alone until it ends
-# (about 20 minutes). It stops if the keyboard or mouse is used.
+# (about 15 minutes). It stops if the keyboard or mouse is used.
 # Usage: scripts/bench.sh [defaults|mine]...
 set -eu
 
@@ -22,10 +21,15 @@ vte=$work/vtebench
 scrollback=100000
 
 # Starts terminal $1 in setup $setup running `sh -c "$2"` once the window is
-# placed, and sets $launcher to the process it started.
+# placed, and sets $launcher to the process it started. The command first
+# writes the grid to $work/size once it stops changing.
 start() {
-    rm -f "$work/ready" "$work/go"
-    command="while [ ! -e '$work/go' ]; do sleep 0.2; done; stty size > '$dir/size.txt'; $2"
+    rm -f "$work/ready" "$work/go" "$work/size"
+    # New windows open on the focused workspace: no move across monitors.
+    aerospace workspace "$bench_ws"
+    command="while [ ! -e '$work/go' ]; do sleep 0.2; done
+        size=; until [ \"\$size\" = \"\$(stty size)\" ]; do size=\$(stty size); sleep 1; done
+        echo \"\$size\" > '$work/size'; $2"
     case $1-$setup in
     slutty-defaults)
         # An empty config directory: slutty's defaults.
@@ -51,8 +55,8 @@ start() {
 }
 
 # Moves the started terminal's window alone onto the empty workspace $bench_ws,
-# where it fills the screen instead of being tiled beside others, then lets its
-# command run. Sets $pid to the process that draws.
+# where it fills the screen instead of being tiled beside others, brings it to
+# the front, then lets its command run. Sets $pid to the process that draws.
 place() {
     i=0
     while :; do
@@ -69,8 +73,21 @@ place() {
     done
     aerospace move-node-to-workspace --window-id "$window" "$bench_ws"
     aerospace workspace "$bench_ws"
+    front "$pid"
     sleep 2
     touch "$work/go"
+}
+
+# Makes process $1 the active app and checks that macOS agrees: AeroSpace's
+# focus does not activate an app a script started. Never send keys instead.
+front() {
+    osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $1) to true" > /dev/null
+    sleep 1
+    if [ "$(lsappinfo info -only pid "$(lsappinfo front)")" != "\"pid\"=$1" ]; then
+        echo "could not bring $1 to the front" >&2
+        stop
+        exit 1
+    fi
 }
 
 # Waits up to 10 minutes for the command to touch $work/ready.
@@ -152,11 +169,13 @@ command -v vtebench > /dev/null || cargo install --locked vtebench
 cargo build --release --locked
 mkdir -p "$work/config" "$out"
 home_ws=$(aerospace list-workspaces --focused)
+home_app=$(lsappinfo info -only pid "$(lsappinfo front)" | tr -dc 0-9)
 bench_ws=$(for ws in $(aerospace list-workspaces --all); do
     [ -n "$(aerospace list-windows --workspace "$ws")" ] || { echo "$ws"; break; }
 done)
 [ -n "$bench_ws" ] || { echo "no empty AeroSpace workspace" >&2; exit 1; }
-trap 'aerospace workspace "$home_ws"' EXIT
+aerospace move-workspace-to-monitor --workspace "$bench_ws" main
+trap 'aerospace workspace "$home_ws"; osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $home_app) to true" > /dev/null || true' EXIT
 
 {
     echo "machine: $(sysctl -n hw.model), $(sysctl -n machdep.cpu.brand_string), $(sysctl -n hw.memsize | awk '{ print $1 / 2^30 }') GB"
@@ -167,13 +186,23 @@ trap 'aerospace workspace "$home_ws"' EXIT
 } > "$out/machine.txt"
 
 for setup in $setups; do
+    cols=
     for terminal in slutty wezterm; do
         dir=$out/$setup/$terminal
         mkdir -p "$dir"
+        : > "$dir/size.txt"
         for run in throughput idle scrollback; do
             away
             echo "$setup $terminal: $run"
             $run $terminal
+            read -r rows width < "$work/size"
+            echo "$run $rows $width" >> "$dir/size.txt"
+            # WezTerm's tab bar takes rows, but the width must match.
+            : "${cols:=$width}"
+            if [ "$width" != "$cols" ]; then
+                echo "$setup $terminal $run: $width columns, others had $cols" >&2
+                exit 1
+            fi
         done
     done
 done
@@ -183,7 +212,7 @@ for setup in $setups; do
     for terminal in slutty wezterm; do
         dir=$out/$setup/$terminal
         echo
-        echo "## $setup: $terminal ($(cat "$dir/size.txt") rows, cols)"
+        echo "## $setup: $terminal ($(awk '{ print $2 "×" $3 }' "$dir/size.txt" | sort -u | tr '\n' ' ')cells)"
         means "$dir/vtebench.dat"
         echo "pid cpu idle-wakeups time, every 20 s:"
         awk '$1 ~ /^[0-9]+$/' "$dir/idle.txt"
