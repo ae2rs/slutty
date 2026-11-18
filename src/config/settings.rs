@@ -66,6 +66,9 @@ pub struct Font {
     /// Join character sequences such as `->` into one symbol, where the font
     /// has one.
     pub ligatures: bool,
+    /// Families tried in order for characters `family` lacks, before the
+    /// embedded Nerd Font symbols and the system's own fallback.
+    pub fallback: Vec<String>,
 }
 
 impl Default for Font {
@@ -77,6 +80,7 @@ impl Default for Font {
             bold_weight: FontWeight::Demibold,
             faint_weight: FontWeight::Extralight,
             ligatures: true,
+            fallback: Vec::new(),
         }
     }
 }
