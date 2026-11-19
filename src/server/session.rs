@@ -427,7 +427,7 @@ fn spawn(program: Program, cwd: Option<PathBuf>) -> Spawn {
 
 fn window_state(mux: &Mux, id: WindowId) -> Option<WindowState> {
     let tabs = mux.tabs(id).into_iter().map(|tab| TabState { info: tab.info.clone(), panes: tab.panes }).collect();
-    let Layout { panes, dividers } = mux.layout(id);
+    let Layout { panes, dividers, .. } = mux.layout(id);
     Some(WindowState {
         id,
         size: mux.size(id)?,

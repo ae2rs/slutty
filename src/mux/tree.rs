@@ -36,6 +36,18 @@ pub enum Direction {
 }
 
 impl Direction {
+    /// `cells` along this direction, as columns and rows: right and down
+    /// are positive.
+    pub fn cells(self, cells: u16) -> (i16, i16) {
+        let n = i16::try_from(cells).unwrap_or(i16::MAX);
+        match self {
+            Self::Left => (-n, 0),
+            Self::Right => (n, 0),
+            Self::Up => (0, -n),
+            Self::Down => (0, n),
+        }
+    }
+
     fn axis(self) -> Axis {
         match self {
             Self::Left | Self::Right => Axis::Row,
@@ -55,6 +67,8 @@ enum Node {
 pub struct Layout {
     pub panes: Vec<(PaneId, Rect)>,
     pub dividers: Vec<(Axis, Rect)>,
+    /// The floats shown over the panes, the last on top.
+    pub floats: Vec<(PaneId, Rect)>,
 }
 
 impl Layout {

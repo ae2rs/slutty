@@ -8,9 +8,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use super::float::Place;
 use super::pane::{Pane, PaneInfo, Wake};
 use super::tree::{Axis, Direction, Layout, Rect};
-use super::window::{Tab, Window};
+use super::window::{Float, Tab, Window};
 use super::{PaneId, WindowId};
 use crate::config::Config;
 use crate::pty::Spawn;
@@ -37,6 +38,8 @@ pub struct Placement {
     pub active: bool,
     /// The tab is zoomed on this pane.
     pub zoomed: bool,
+    /// Where it floats, when it does.
+    pub float: Option<Float>,
 }
 
 /// One tab as the tab bar shows it.
@@ -92,7 +95,7 @@ impl Mux {
     /// Closes a window and everything running in it.
     pub fn close_window(&mut self, window: WindowId) {
         if let Some(w) = self.windows.remove(&window) {
-            for pane in w.tabs().iter().flat_map(|tab| tab.tree.panes()) {
+            for pane in w.tabs().iter().flat_map(Tab::panes) {
                 self.panes.remove(&pane);
             }
         }
@@ -123,7 +126,7 @@ impl Mux {
         let Some(w) = self.windows.get(&window) else { return Vec::new() };
         w.tabs()
             .iter()
-            .filter_map(|tab| Some(TabView { info: self.panes.get(&tab.active)?.info(), panes: tab.tree.panes() }))
+            .filter_map(|tab| Some(TabView { info: self.panes.get(&tab.focused())?.info(), panes: tab.panes() }))
             .collect()
     }
 
@@ -140,6 +143,9 @@ impl Mux {
     /// (0 to 1) of the space and becomes active.
     pub fn split(&mut self, pane: PaneId, axis: Axis, share: f32, config: &Config, spawn: Spawn) -> io::Result<PaneId> {
         let (window, index) = self.find(pane).ok_or_else(|| missing("pane", pane.0))?;
+        if self.float(pane).is_some() {
+            return Err(io::Error::other(format!("pane {pane} floats and cannot be split")));
+        }
         let size = self.windows.get(&window).ok_or_else(|| missing("window", window.0))?.size;
         let new = self.spawn(size, config, spawn)?;
         self.change_focus(window, |w| {
@@ -147,7 +153,7 @@ impl Mux {
             let tab = w.active_tab_mut();
             tab.zoomed = false;
             tab.tree.split(pane, new, axis, share);
-            tab.active = new;
+            tab.focus_tiled(new);
         });
         self.fit_tab(window, None);
         Ok(new)
@@ -160,10 +166,70 @@ impl Mux {
         }
     }
 
+    /// Opens a float in the tab of `pane`, running `spawn`. It gets the
+    /// keys unless `hidden`.
+    pub fn float_pane(
+        &mut self,
+        pane: PaneId,
+        place: Place,
+        hidden: bool,
+        config: &Config,
+        spawn: Spawn,
+    ) -> io::Result<PaneId> {
+        let (window, index) = self.find(pane).ok_or_else(|| missing("pane", pane.0))?;
+        let size = self.windows.get(&window).ok_or_else(|| missing("window", window.0))?.size;
+        let new = self.spawn(size, config, spawn)?;
+        self.change_focus(window, |w| {
+            w.activate(index);
+            w.active_tab_mut().add_float(new, place, hidden);
+        });
+        self.fit_tab(window, Some(index));
+        Ok(new)
+    }
+
+    /// Where `pane` floats; `None` when it is tiled or gone.
+    pub fn float(&self, pane: PaneId) -> Option<Float> {
+        let (window, index) = self.find(pane)?;
+        self.windows.get(&window)?.tabs()[index].float(pane).copied()
+    }
+
+    /// Changes where the float `pane` goes through `f`, which gets the tab's
+    /// area too.
+    pub fn place_float(&mut self, pane: PaneId, f: impl FnOnce(&mut Place, Rect)) {
+        let Some((window, index)) = self.find(pane) else { return };
+        let Some(w) = self.windows.get_mut(&window) else { return };
+        let area = w.area();
+        let Some(float) = w.tab_mut(index).float_mut(pane) else { return };
+        f(&mut float.place, area);
+        self.fit_tab(window, Some(index));
+    }
+
+    /// Hides the float `pane`. Its program runs on.
+    pub fn hide_float(&mut self, pane: PaneId) {
+        let Some((window, index)) = self.find(pane) else { return };
+        self.change_focus(window, |w| w.tab_mut(index).hide(pane));
+    }
+
+    /// Hides the floats of the window's active tab when one shows, else
+    /// shows them all. Returns whether it has any.
+    pub fn toggle_floats(&mut self, window: WindowId) -> bool {
+        let mut any = false;
+        self.change_focus(window, |w| any = w.active_tab_mut().toggle_floats());
+        any
+    }
+
+    /// Moves the keys from the tiled panes through the floats shown and back.
+    pub fn cycle_floats(&mut self, window: WindowId) {
+        self.change_focus(window, |w| w.active_tab_mut().cycle_floats());
+    }
+
     /// Moves `pane` into a new window of the same size, or its tab when it
     /// is the tab's only pane. Returns the new window; `None` when the pane
-    /// is alone in its window.
+    /// is alone in its window, or floats.
     pub fn pop_pane(&mut self, pane: PaneId) -> Option<WindowId> {
+        if self.float(pane).is_some() {
+            return None;
+        }
         let (window, index) = self.find(pane)?;
         let size = self.windows.get(&window)?.size;
         let mut detached = false;
@@ -202,15 +268,19 @@ impl Mux {
         Some(self.adopt(size, removed?))
     }
 
-    /// Shows `pane`: its tab becomes active, and it the active pane, out of
-    /// a zoom that hid it. Returns its window.
+    /// Shows `pane` and gives it the keys: its tab becomes active, out of a
+    /// zoom that hid it, and a float comes to the top. Returns its window.
     pub fn reveal(&mut self, pane: PaneId) -> Option<WindowId> {
         let (window, index) = self.find(pane)?;
         self.change_focus(window, |w| {
             w.activate(index);
             let tab = w.active_tab_mut();
-            tab.zoomed &= tab.active == pane;
-            tab.active = pane;
+            if tab.float(pane).is_some() {
+                tab.raise(pane);
+            } else {
+                tab.zoomed &= tab.active == pane;
+                tab.focus_tiled(pane);
+            }
         });
         self.fit_tab(window, None);
         Some(window)
@@ -230,17 +300,26 @@ impl Mux {
         self.panes.get(&pane).and_then(|p| p.info().cwd.clone())
     }
 
-    /// Makes the pane next to `pane` in `direction` active.
+    /// Makes the pane next to `pane` in `direction` active. From a float,
+    /// the keys go back to the tiled panes.
     pub fn focus_direction(&mut self, pane: PaneId, direction: Direction) {
         let Some((window, index)) = self.find(pane) else { return };
         let Some(w) = self.windows.get(&window) else { return };
-        if let Some(next) = w.tabs()[index].tree.neighbour(w.area(), pane, direction) {
+        let tab = &w.tabs()[index];
+        let next =
+            if tab.float(pane).is_some() { Some(tab.active) } else { tab.tree.neighbour(w.area(), pane, direction) };
+        if let Some(next) = next {
             self.reveal(next);
         }
     }
 
-    /// Moves the divider nearest `pane` by `cells`.
+    /// Moves the divider nearest `pane` by `cells`. A float grows or
+    /// shrinks instead: right and down grow it.
     pub fn resize_pane(&mut self, pane: PaneId, direction: Direction, cells: u16) {
+        if self.float(pane).is_some() {
+            let (cols, rows) = direction.cells(cells);
+            return self.place_float(pane, |place, area| place.grow(area, cols, rows));
+        }
         let Some((window, index)) = self.find(pane) else { return };
         let Some(w) = self.windows.get_mut(&window) else { return };
         let area = w.area();
@@ -252,13 +331,16 @@ impl Mux {
         self.fit_tab(window, Some(index));
     }
 
-    /// Zooms `pane`, or ends the zoom of its tab.
+    /// Zooms `pane`, or ends the zoom of its tab. A float does not zoom.
     pub fn toggle_zoom(&mut self, pane: PaneId) {
+        if self.float(pane).is_some() {
+            return;
+        }
         let Some((window, index)) = self.find(pane) else { return };
         self.change_focus(window, |w| {
             let tab = w.tab_mut(index);
             tab.zoomed = !tab.zoomed && tab.tree.panes().len() > 1;
-            tab.active = pane;
+            tab.focus_tiled(pane);
         });
         self.fit_tab(window, Some(index));
     }
@@ -271,7 +353,7 @@ impl Mux {
 
     /// The pane keys and pastes go to.
     pub fn active_pane(&self, window: WindowId) -> Option<PaneId> {
-        Some(self.windows.get(&window)?.active_tab().active)
+        Some(self.windows.get(&window)?.active_tab().focused())
     }
 
     /// Every pane, window by window and tab by tab, in reading order.
@@ -279,9 +361,23 @@ impl Mux {
         let mut placements = Vec::new();
         for (&window, w) in &self.windows {
             for (tab, t) in w.tabs().iter().enumerate() {
+                let focused = t.focused();
                 for (pane, rect) in t.tree.layout(w.area()).panes {
-                    let active = pane == t.active;
-                    placements.push(Placement { window, tab, pane, rect, active, zoomed: active && t.zoomed });
+                    let zoomed = t.zoomed && pane == t.active;
+                    placements.push(Placement {
+                        window,
+                        tab,
+                        pane,
+                        rect,
+                        active: pane == focused,
+                        zoomed,
+                        float: None,
+                    });
+                }
+                for &float in t.floats() {
+                    let (pane, rect) = (float.pane, float.place.rect(w.area()));
+                    let active = pane == focused;
+                    placements.push(Placement { window, tab, pane, rect, active, zoomed: false, float: Some(float) });
                 }
             }
         }
@@ -314,7 +410,7 @@ impl Mux {
     /// shell in any of its panes.
     pub fn active_tab_busy(&self, window: WindowId) -> bool {
         let Some(w) = self.windows.get(&window) else { return false };
-        w.active_tab().tree.panes().iter().filter_map(|id| self.panes.get(id)).any(Pane::is_busy)
+        w.active_tab().panes().iter().filter_map(|id| self.panes.get(id)).any(Pane::is_busy)
     }
 
     pub fn pane_mut(&mut self, id: PaneId) -> Option<&mut Pane> {
@@ -342,7 +438,7 @@ impl Mux {
         if focused {
             self.last_focused = Some(window);
         }
-        let pane = w.active_tab().active;
+        let pane = w.active_tab().focused();
         if let Some(pane) = self.panes.get_mut(&pane) {
             pane.focus(focused);
         }
@@ -386,7 +482,9 @@ impl Mux {
         let mut removed = false;
         self.change_focus(window, |w| {
             let tab = w.tab_mut(index);
-            if let Some(next) = tab.tree.remove(pane) {
+            if tab.remove_float(pane) {
+                removed = true;
+            } else if let Some(next) = tab.tree.remove(pane) {
                 removed = true;
                 tab.zoomed = false;
                 if tab.active == pane {
@@ -406,7 +504,7 @@ impl Mux {
         let mut removed = None;
         self.change_focus(window, |w| removed = Some(w.remove(index)));
         let Some((tab, empty)) = removed else { return };
-        for pane in tab.tree.panes() {
+        for pane in tab.panes() {
             self.panes.remove(&pane);
         }
         if empty {
@@ -434,8 +532,10 @@ impl Mux {
         let Some(w) = self.windows.get(&window) else { return };
         let Some(tab) = w.tabs().get(index.unwrap_or(w.active())) else { return };
         let size = w.size;
-        // A zoomed tab's hidden panes keep their size.
-        for (id, rect) in tab.layout(w.area()).panes {
+        // A zoomed tab's hidden panes keep their size; hidden floats take
+        // theirs, ready to show.
+        let floats = tab.floats().iter().map(|f| (f.pane, f.place.rect(w.area())));
+        for (id, rect) in tab.layout(w.area()).panes.into_iter().chain(floats) {
             if let Some(pane) = self.panes.get_mut(&id) {
                 pane.resize(Geometry { cols: rect.cols.max(1), rows: rect.rows.max(1), ..size });
             }

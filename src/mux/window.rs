@@ -2,30 +2,150 @@
 //! bookkeeping.
 
 use super::PaneId;
+use super::float::Place;
 use super::tree::{Layout, Rect, Tree};
 use crate::terminal::Geometry;
+
+/// A pane over the tiled ones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Float {
+    pub pane: PaneId,
+    pub place: Place,
+    pub hidden: bool,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Tab {
     pub tree: Tree,
-    /// The pane keys go to. Always in `tree`.
+    /// The tiled pane keys go to while no float has them. Always in `tree`.
     pub active: PaneId,
-    /// Whether the active pane fills the tab, hiding the others.
+    /// Whether the active pane fills the tab, hiding the other tiled ones.
     pub zoomed: bool,
+    /// The last is on top.
+    floats: Vec<Float>,
+    /// Keys go to the top shown float. Only set while one shows.
+    floating: bool,
 }
 
 impl Tab {
     pub fn new(pane: PaneId) -> Self {
-        Self { tree: Tree::new(pane), active: pane, zoomed: false }
+        Self { tree: Tree::new(pane), active: pane, zoomed: false, floats: Vec::new(), floating: false }
+    }
+
+    /// The pane keys go to.
+    pub fn focused(&self) -> PaneId {
+        match self.floats.iter().rev().find(|f| !f.hidden) {
+            Some(top) if self.floating => top.pane,
+            _ => self.active,
+        }
+    }
+
+    /// Every pane: the tiled ones in reading order, then the floats from
+    /// the bottom.
+    pub fn panes(&self) -> Vec<PaneId> {
+        let mut panes = self.tree.panes();
+        panes.extend(self.floats.iter().map(|f| f.pane));
+        panes
+    }
+
+    pub fn contains(&self, pane: PaneId) -> bool {
+        self.tree.contains(pane) || self.float(pane).is_some()
+    }
+
+    pub fn floats(&self) -> &[Float] {
+        &self.floats
+    }
+
+    pub fn float(&self, pane: PaneId) -> Option<&Float> {
+        self.floats.iter().find(|f| f.pane == pane)
+    }
+
+    pub fn float_mut(&mut self, pane: PaneId) -> Option<&mut Float> {
+        self.floats.iter_mut().find(|f| f.pane == pane)
+    }
+
+    /// Adds a float on top, with the keys unless `hidden`.
+    pub fn add_float(&mut self, pane: PaneId, place: Place, hidden: bool) {
+        self.floats.push(Float { pane, place, hidden });
+        self.floating |= !hidden;
+    }
+
+    /// Shows the float `pane` on top and gives it the keys.
+    pub fn raise(&mut self, pane: PaneId) {
+        let Some(at) = self.floats.iter().position(|f| f.pane == pane) else { return };
+        let mut float = self.floats.remove(at);
+        float.hidden = false;
+        self.floats.push(float);
+        self.floating = true;
+    }
+
+    /// Hides the float `pane`; the keys go to the next float shown, else to
+    /// the tiled panes.
+    pub fn hide(&mut self, pane: PaneId) {
+        if let Some(float) = self.float_mut(pane) {
+            float.hidden = true;
+        }
+        self.settle();
+    }
+
+    /// Takes the float `pane` out. Returns whether it was one.
+    pub fn remove_float(&mut self, pane: PaneId) -> bool {
+        let before = self.floats.len();
+        self.floats.retain(|f| f.pane != pane);
+        self.settle();
+        self.floats.len() != before
+    }
+
+    /// Gives the keys to the tiled pane `pane`.
+    pub fn focus_tiled(&mut self, pane: PaneId) {
+        self.active = pane;
+        self.floating = false;
+    }
+
+    /// Hides every float when one shows, else shows them all. Returns
+    /// whether there were any.
+    pub fn toggle_floats(&mut self) -> bool {
+        let show = self.floats.iter().all(|f| f.hidden);
+        for float in &mut self.floats {
+            float.hidden = !show;
+        }
+        self.floating = show;
+        self.settle();
+        !self.floats.is_empty()
+    }
+
+    /// Moves the keys on: from the tiled panes to the first float shown,
+    /// from a float to the next one shown, in the order they were made,
+    /// and from the last back to the tiled panes.
+    pub fn cycle_floats(&mut self) {
+        let mut shown: Vec<PaneId> = self.floats.iter().filter(|f| !f.hidden).map(|f| f.pane).collect();
+        shown.sort();
+        let next = if self.floating {
+            let focused = self.focused();
+            shown.into_iter().find(|&pane| pane > focused)
+        } else {
+            shown.first().copied()
+        };
+        match next {
+            Some(pane) => self.raise(pane),
+            None => self.floating = false,
+        }
     }
 
     /// Where each shown pane goes in `area`.
     pub fn layout(&self, area: Rect) -> Layout {
-        if self.zoomed {
-            Layout { panes: vec![(self.active, area)], dividers: Vec::new() }
+        let mut layout = if self.zoomed {
+            Layout { panes: vec![(self.active, area)], ..Layout::default() }
         } else {
             self.tree.layout(area)
-        }
+        };
+        layout.floats = self.floats.iter().filter(|f| !f.hidden).map(|f| (f.pane, f.place.rect(area))).collect();
+        layout
+    }
+
+    /// Keeps `floating` only while a float shows.
+    fn settle(&mut self) {
+        self.floating &= self.floats.iter().any(|f| !f.hidden);
     }
 }
 
@@ -96,7 +216,7 @@ impl Window {
 
     /// The tab holding `pane`.
     pub fn position(&self, pane: PaneId) -> Option<usize> {
-        self.tabs.iter().position(|tab| tab.tree.contains(pane))
+        self.tabs.iter().position(|tab| tab.contains(pane))
     }
 }
 
@@ -151,5 +271,62 @@ mod tests {
         tab.zoomed = true;
         let area = Rect { x: 0, y: 0, cols: 80, rows: 24 };
         assert_eq!(tab.layout(area).panes, vec![(PaneId(1), area)]);
+    }
+
+    fn floats(tab: &Tab) -> Vec<(u64, bool)> {
+        tab.floats().iter().map(|f| (f.pane.0, f.hidden)).collect()
+    }
+
+    #[test]
+    fn a_shown_float_takes_the_keys_until_hidden() {
+        let mut tab = Tab::new(PaneId(0));
+        tab.add_float(PaneId(1), Place::default(), false);
+        tab.add_float(PaneId(2), Place::default(), true);
+        assert_eq!(tab.focused(), PaneId(1), "a hidden float does not take the keys");
+        tab.raise(PaneId(2));
+        assert_eq!((tab.focused(), floats(&tab)), (PaneId(2), vec![(1, false), (2, false)]), "raised on top");
+        tab.hide(PaneId(2));
+        assert_eq!(tab.focused(), PaneId(1), "to the next float shown");
+        tab.hide(PaneId(1));
+        assert_eq!(tab.focused(), PaneId(0), "back to the tiled panes");
+        assert!(tab.layout(Rect { x: 0, y: 0, cols: 80, rows: 24 }).floats.is_empty());
+    }
+
+    #[test]
+    fn toggling_hides_all_floats_or_shows_them_all() {
+        let mut tab = Tab::new(PaneId(0));
+        assert!(!tab.toggle_floats(), "no floats");
+        tab.add_float(PaneId(1), Place::default(), false);
+        tab.add_float(PaneId(2), Place::default(), true);
+        assert!(tab.toggle_floats());
+        assert_eq!((tab.focused(), floats(&tab)), (PaneId(0), vec![(1, true), (2, true)]));
+        tab.toggle_floats();
+        assert_eq!((tab.focused(), floats(&tab)), (PaneId(2), vec![(1, false), (2, false)]));
+    }
+
+    #[test]
+    fn cycling_goes_through_the_floats_shown_and_back() {
+        let mut tab = Tab::new(PaneId(0));
+        for (pane, hidden) in [(1, false), (2, true), (3, false)] {
+            tab.add_float(PaneId(pane), Place::default(), hidden);
+        }
+        tab.focus_tiled(PaneId(0));
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            tab.cycle_floats();
+            seen.push(tab.focused().0);
+        }
+        assert_eq!(seen, [1, 3, 0, 1]);
+    }
+
+    #[test]
+    fn a_closed_float_hands_the_keys_on() {
+        let mut tab = Tab::new(PaneId(0));
+        tab.add_float(PaneId(1), Place::default(), false);
+        assert!(tab.contains(PaneId(1)));
+        assert_eq!(tab.panes(), [PaneId(0), PaneId(1)]);
+        assert!(tab.remove_float(PaneId(1)));
+        assert!(!tab.remove_float(PaneId(0)), "a tiled pane is not a float");
+        assert_eq!(tab.focused(), PaneId(0));
     }
 }
