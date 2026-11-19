@@ -49,6 +49,19 @@ Panes run in a server process, `slutty server`, which the app starts by itself. 
 - Log: `~/Library/Logs/slutty/server.log`.
 - Each pane gets `SLUTTY_PANE` (its id) and `SLUTTY_SOCKET`.
 
+### Scripting
+
+`slutty cli` drives the server from a shell, like `wezterm cli`. Commands that make a pane print its id.
+
+```sh
+slutty cli list [--format json]
+slutty cli split-pane --right --percent 30 -- htop
+slutty cli send-text --pane-id 3 'make test'
+slutty cli get-text --pane-id 3 --start-line -100
+```
+
+Also `spawn`, `activate-pane`, `activate-pane-direction`, `adjust-pane-size`, `zoom-pane`, `kill-pane` and `kill-server`; `slutty cli help` lists them. A command acts on `--pane-id`, else on the pane it runs in, else on the focused pane. It exits 1 when the server refuses and 2 on bad arguments.
+
 ### Keys
 
 The leader is `ctrl+s`. A few defaults:

@@ -1,4 +1,5 @@
 mod animation;
+mod cli;
 mod client;
 mod config;
 mod font;
@@ -38,6 +39,8 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Role {
+    /// Talks to the server: lists, spawns and drives panes.
+    Cli(cli::Cli),
     /// Runs the mux server, which the app starts by itself.
     Server {
         /// Goes to the background and logs to ~/Library/Logs/slutty.
@@ -63,6 +66,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
     match args.role {
+        Some(Role::Cli(args)) => cli::run(&socket, args),
         Some(Role::Server { daemon }) => server::main(socket, daemon),
         None => platform::run(config::path(), &socket, first_program(args.command)),
     }

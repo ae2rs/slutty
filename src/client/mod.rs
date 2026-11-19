@@ -7,6 +7,6 @@ mod mirror;
 mod mode_keys;
 
 pub use connection::{Connection, log_failure};
-pub use dial::{ConnectError, connect_or_start, stop_server};
+pub use dial::{ConnectError, connect, connect_or_start, stop_server};
 pub use mirror::{Changes, Mirror};
 pub use mode_keys::{ModeKey, mode_key};
