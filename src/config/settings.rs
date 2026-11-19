@@ -107,7 +107,8 @@ pub struct Window {
     pub cols: u16,
     pub rows: u16,
     pub padding: Padding,
-    /// Ask before quitting.
+    /// Not read: quitting only detaches from the server. Still accepted so
+    /// existing files load.
     pub confirm_quit: bool,
 }
 

@@ -2,6 +2,7 @@
 //! run in the mux server (docs/design.md).
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,14 +38,27 @@ pub struct Mux {
     windows: BTreeMap<WindowId, Window>,
     next_id: u64,
     wake: Wake,
+    /// Set in every pane on top of the terminal's own.
+    env: Vec<(OsString, OsString)>,
     buf: Vec<u8>,
 }
 
 impl Mux {
     /// `wake` runs on another thread when output is waiting; the owner must
-    /// then call [`Mux::pump`] on this thread.
-    pub fn new(wake: impl Fn() + Send + Sync + 'static) -> Self {
-        Self { panes: BTreeMap::new(), windows: BTreeMap::new(), next_id: 0, wake: Arc::new(wake), buf: Vec::new() }
+    /// then call [`Mux::pump`] on this thread. Every pane gets `env`.
+    pub fn new(wake: impl Fn() + Send + Sync + 'static, env: Vec<(OsString, OsString)>) -> Self {
+        Self {
+            panes: BTreeMap::new(),
+            windows: BTreeMap::new(),
+            next_id: 0,
+            wake: Arc::new(wake),
+            env,
+            buf: Vec::new(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.windows.is_empty()
     }
 
     pub fn window_ids(&self) -> Vec<WindowId> {
@@ -388,7 +402,7 @@ impl Mux {
 
     fn spawn(&mut self, size: Geometry, config: &Config, spawn: Spawn) -> io::Result<PaneId> {
         let id = PaneId(self.next_id());
-        let pane = Pane::spawn(id, size, config, spawn, &self.wake)?;
+        let pane = Pane::spawn(id, size, config, spawn, &self.env, &self.wake)?;
         self.panes.insert(id, pane);
         Ok(id)
     }

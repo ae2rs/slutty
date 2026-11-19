@@ -1,27 +1,28 @@
-use std::path::PathBuf;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use objc2::rc::Retained;
 use objc2::runtime::{NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSApplicationTerminateReply,
-    NSBackingStoreType, NSEventModifierFlags, NSMenu, NSMenuItem, NSScreen, NSWindow, NSWindowButton,
-    NSWindowStyleMask, NSWindowTitleVisibility,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSEventModifierFlags,
+    NSMenu, NSMenuItem, NSScreen, NSWindow, NSWindowButton, NSWindowStyleMask, NSWindowTitleVisibility,
 };
-use objc2_foundation::{NSObject, NSPoint, NSRect, NSString};
+use objc2_foundation::{NSNotification, NSObject, NSPoint, NSRect, NSString};
 
 use super::actions;
 use super::layout::{self, Layout};
 use super::notify;
 use super::state::{self, App, Settings, with_app};
 use super::view::TerminalView;
-use crate::client::Connection;
+use crate::client::{self, ConnectError, Connection};
 use crate::config::{self, Config};
 use crate::font::Fonts;
 use crate::mux::WindowId;
 use crate::proto::{Command, Program};
 use crate::renderer::Renderer;
+use crate::terminal::Geometry;
 
 define_class!(
     #[unsafe(super(NSObject))]
@@ -36,17 +37,10 @@ define_class!(
             true
         }
 
-        #[unsafe(method(applicationShouldTerminate:))]
-        fn should_terminate(&self, _app: &NSApplication) -> NSApplicationTerminateReply {
-            // With no window left, as after the last shell exits, nothing is
-            // lost by quitting.
-            let ask = with_app(|app| app.config().window.confirm_quit).unwrap_or(false) && !state::views().is_empty();
-            if !ask || actions::alert(self.mtm(), "Quit slutty?", "Every shell in every window will be closed.", "Quit")
-            {
-                NSApplicationTerminateReply::TerminateNow
-            } else {
-                NSApplicationTerminateReply::TerminateCancel
-            }
+        // Quitting only detaches: the panes live on in the server.
+        #[unsafe(method(applicationWillTerminate:))]
+        fn will_terminate(&self, _notification: &NSNotification) {
+            state::disconnect();
         }
     }
 );
@@ -71,8 +65,10 @@ fn load_settings(path: Option<PathBuf>) -> Settings {
     Settings { config, path, error }
 }
 
-/// Opens one terminal window running `first` and runs the AppKit event loop.
-pub fn run(config_path: Option<PathBuf>, first: Program) -> ExitCode {
+/// Attaches to the server on `socket`, starting one if needed, opens a
+/// window running `first` (with no command, only when the server has no
+/// window), and runs the AppKit event loop.
+pub fn run(config_path: Option<PathBuf>, socket: &Path, first: Program) -> ExitCode {
     let Some(mtm) = MainThreadMarker::new() else {
         log::error!("slutty must start on the main thread");
         return ExitCode::FAILURE;
@@ -99,27 +95,67 @@ pub fn run(config_path: Option<PathBuf>, first: Program) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-    let connection = Connection::local(settings.path.clone(), state::wake_from_any_thread);
+    let Some(stream) = attach(mtm, socket) else { return ExitCode::FAILURE };
+    let connection = match Connection::new(stream, state::wake_from_any_thread) {
+        Ok(connection) => connection,
+        Err(err) => {
+            log::error!("talking to the server failed: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
     App::start(connection, renderer, settings, scale);
 
     notify::start();
-    with_app(|app| app.request_first_window(window_request(app, first)));
+    with_app(|app| {
+        let (program, size) = (first, window_size(app));
+        app.request_first_window(if program.command.is_none() {
+            Command::OpenFirstWindow { program, size }
+        } else {
+            Command::OpenWindow { program, size }
+        });
+    });
     app.activate();
     app.run();
     ExitCode::SUCCESS
 }
 
+/// Connects to the server, starting one if none runs. A server from another
+/// version can be restarted, which closes its panes.
+fn attach(mtm: MainThreadMarker, socket: &Path) -> Option<UnixStream> {
+    let err = match client::connect_or_start(socket) {
+        Ok(stream) => return Some(stream),
+        Err(err) => err,
+    };
+    log::error!("attaching to the server failed: {err}");
+    let ConnectError::Mismatch(header) = err else { return None };
+    let info = "Restarting the server closes every pane it runs.";
+    if !actions::alert(mtm, "slutty was updated", info, "Restart") {
+        return None;
+    }
+    let restarted = client::stop_server(socket, header.pid).map_err(ConnectError::Io);
+    match restarted.and_then(|()| client::connect_or_start(socket)) {
+        Ok(stream) => Some(stream),
+        Err(err) => {
+            log::error!("restarting the server failed: {err}");
+            None
+        }
+    }
+}
+
 /// Asks the server for a window running `program`, of the configured size.
 /// It shows once the server reports it.
 pub(super) fn open_window(program: Program) {
-    with_app(|app| app.request(window_request(app, program)));
+    with_app(|app| {
+        let size = window_size(app);
+        app.request(Command::OpenWindow { program, size });
+    });
 }
 
-fn window_request(app: &App, program: Program) -> Command {
+/// The pane area of a window of the configured size.
+fn window_size(app: &App) -> Geometry {
     let (config, m) = (app.config(), app.renderer.metrics());
     let size = layout::content_size(config.window.cols, config.window.rows, config, m, app.scale, app.tab_bar);
-    let layout = Layout::new(size, app.scale, m, config.window.padding, app.tab_bar);
-    Command::OpenWindow { program, size: layout.area }
+    Layout::new(size, app.scale, m, config.window.padding, app.tab_bar).area
 }
 
 /// Shows mux window `id` in an NSWindow that fits its grid, cascaded from

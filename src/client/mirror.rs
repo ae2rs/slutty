@@ -38,6 +38,8 @@ pub struct Changes {
     pub open_urls: Vec<String>,
     /// The answer to the last hover, if one came.
     pub hover: Option<Option<Hover>>,
+    /// A newer UI took over.
+    pub detached: bool,
 }
 
 impl Mirror {
@@ -66,6 +68,7 @@ impl Mirror {
             Event::Notification { pane, notification } => changes.notifications.push((pane, notification)),
             Event::OpenUrl(url) => changes.open_urls.push(url),
             Event::Hover(hover) => changes.hover = Some(hover),
+            Event::Detached => changes.detached = true,
         }
     }
 

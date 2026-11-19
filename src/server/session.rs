@@ -3,7 +3,7 @@
 //! holds a pane's next update until the UI has drawn the last one.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::config::{self, Config};
@@ -23,6 +23,9 @@ pub struct Session {
     ui: Option<Ui>,
     /// Events that are not state: the clipboard, notifications, links.
     queued: Vec<Event>,
+    /// A window was open once; the server ends when the last one closes.
+    opened: bool,
+    killed: bool,
 }
 
 #[derive(Default)]
@@ -40,16 +43,35 @@ struct Shown {
 
 impl Session {
     /// `wake` runs on another thread when output is waiting; the owner must
-    /// then call [`Session::pump`].
-    pub fn new(wake: impl Fn() + Send + Sync + 'static, config_path: Option<PathBuf>) -> Self {
+    /// then call [`Session::pump`]. Panes are told the server is at `socket`.
+    pub fn new(wake: impl Fn() + Send + Sync + 'static, config_path: Option<PathBuf>, socket: &Path) -> Self {
         let config = load(config_path.as_deref());
-        Self { mux: Mux::new(wake), config, config_path, ui: None, queued: Vec::new() }
+        let env = vec![("SLUTTY_SOCKET".into(), socket.as_os_str().to_owned())];
+        Self {
+            mux: Mux::new(wake, env),
+            config,
+            config_path,
+            ui: None,
+            queued: Vec::new(),
+            opened: false,
+            killed: false,
+        }
     }
 
     /// A UI attached: it hears about every window and pane from scratch.
     pub fn attach(&mut self) {
         self.ui = Some(Ui::default());
         self.queued.clear();
+    }
+
+    pub fn detach(&mut self) {
+        self.ui = None;
+        self.queued.clear();
+    }
+
+    /// The last window closed, or a client asked the server to stop.
+    pub fn is_over(&self) -> bool {
+        self.killed || (self.opened && self.mux.is_empty())
     }
 
     /// The soonest a synchronized-output hold expires; [`Session::events`]
@@ -74,9 +96,11 @@ impl Session {
         log::debug!("request {command:?}");
         let spawned = |window, pane| Reply::Spawned { window, pane };
         match command {
-            Command::OpenWindow { program, size } => {
+            Command::OpenFirstWindow { .. } if !self.mux.is_empty() => Ok(Reply::Done),
+            Command::OpenWindow { program, size } | Command::OpenFirstWindow { program, size } => {
                 let spawn = spawn(program, None);
                 let (window, pane) = self.mux.open_window(size, &self.config, spawn).map_err(|e| e.to_string())?;
+                self.opened = true;
                 Ok(spawned(window, pane))
             }
             Command::NewTab { window, program } => {
@@ -177,6 +201,10 @@ impl Session {
                 } else {
                     p.send(text.as_bytes());
                 }
+                Ok(Reply::Done)
+            }
+            Command::KillServer => {
+                self.killed = true;
                 Ok(Reply::Done)
             }
             Command::ReloadConfig => {
@@ -472,7 +500,7 @@ mod tests {
 
     #[test]
     fn a_ui_hears_of_windows_and_gets_output_one_update_at_a_time() {
-        let mut session = Session::new(|| {}, None);
+        let mut session = Session::new(|| {}, None, Path::new("/tmp/slutty-test.sock"));
         session.attach();
         let (window, pane) = open(&mut session, sh("printf ready; read line; printf \"got $line\"; sleep 5"));
         let events = session.events();
@@ -503,7 +531,7 @@ mod tests {
 
     #[test]
     fn a_new_ui_gets_every_row_again() {
-        let mut session = Session::new(|| {}, None);
+        let mut session = Session::new(|| {}, None, Path::new("/tmp/slutty-test.sock"));
         session.attach();
         let (_, pane) = open(&mut session, sh("printf marker; sleep 5"));
         wait_for(&mut session, pane, "marker");
@@ -514,7 +542,7 @@ mod tests {
 
     #[test]
     fn closing_asks_first_when_more_than_a_shell_runs() {
-        let mut session = Session::new(|| {}, None);
+        let mut session = Session::new(|| {}, None, Path::new("/tmp/slutty-test.sock"));
         session.attach();
         let (window, pane) = open(&mut session, sh("printf ready; exec sleep 5"));
         wait_for(&mut session, pane, "ready");

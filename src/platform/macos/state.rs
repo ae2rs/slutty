@@ -10,9 +10,8 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
 
-use dispatch2::{DispatchQueue, DispatchTime};
+use dispatch2::DispatchQueue;
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 
@@ -55,7 +54,6 @@ pub struct App {
     /// The system stats the tab bar shows, for every window.
     pub status: Monitor,
     watcher: Option<Watcher>,
-    hold_timer: bool,
 }
 
 thread_local! {
@@ -128,7 +126,6 @@ impl App {
             swallowed: Vec::new(),
             scale,
             watcher: None,
-            hold_timer: false,
         };
         APP.with(|cell| *cell.borrow_mut() = Some(app));
         watch_config();
@@ -233,16 +230,27 @@ fn pump() {
         {
             app.jump_pending = None;
         }
-        (changes, confirms, app.connection.deadline())
+        let gone = app.connection.gone();
+        (changes, confirms, gone)
     });
-    let Some((changes, confirms, deadline)) = received else { return };
+    let Some((changes, confirms, gone)) = received else { return };
+    let detached = changes.detached;
     show(changes);
-    if let Some(deadline) = deadline {
-        schedule_hold_timeout(deadline);
+    if let Some(reason) = gone.or_else(|| detached.then(|| "a newer slutty took over".to_owned())) {
+        log::info!("quitting: {reason}");
+        if let Some(mtm) = MainThreadMarker::new() {
+            objc2_app_kit::NSApplication::sharedApplication(mtm).terminate(None);
+        }
+        return;
     }
     for confirm in confirms {
         ask_and_send(confirm);
     }
+}
+
+/// Sends what is queued for the server and hangs up, as the app quits.
+pub fn disconnect() {
+    with_app(|app| app.connection.close());
 }
 
 fn show(changes: Changes) {
@@ -298,23 +306,6 @@ fn ask_and_send((message, command): (&'static str, Command)) {
             other => other,
         };
         with_app(|app| app.request(command));
-    }
-}
-
-/// Comes back when a synchronized-output hold expires, so a program that
-/// never releases it cannot freeze the screen.
-fn schedule_hold_timeout(deadline: Instant) {
-    if with_app(|app| std::mem::replace(&mut app.hold_timer, true)) != Some(false) {
-        return;
-    }
-    let delay = deadline.saturating_duration_since(Instant::now());
-    let when = DispatchTime::try_from(delay).unwrap_or(DispatchTime::NOW);
-    let scheduled = DispatchQueue::main().after(when, || {
-        with_app(|app| app.hold_timer = false);
-        pump();
-    });
-    if scheduled.is_err() {
-        with_app(|app| app.hold_timer = false);
     }
 }
 

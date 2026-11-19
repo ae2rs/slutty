@@ -21,6 +21,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.2.1"
 regex = { version = "1.13", default-features = false, features = ["std", "perf", "unicode"] }
 postcard = { version = "1", default-features = false, features = ["use-std"] }
+clap = { version = "4", features = ["derive"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"

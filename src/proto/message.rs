@@ -15,6 +15,24 @@ use crate::terminal::copy_mode;
 use crate::terminal::{Cursor, Geometry, Highlight, Notification, Pointer, Row, SearchStatus};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ClientMessage {
+    /// The first message, once: who is asking.
+    Hello { role: Role },
+    /// Answered by a [`ServerMessage::Response`] with the same id.
+    Request { id: u32, command: Command },
+    /// The UI's input; never answered.
+    Input(Input),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Role {
+    /// Hears every event. One at a time: a new one detaches the last.
+    Ui,
+    /// Only sends requests.
+    Cli,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ServerMessage {
     Response {
         id: u32,
@@ -36,6 +54,12 @@ pub struct Program {
 pub enum Command {
     /// Opens a window running `program`, with a grid of `size`.
     OpenWindow {
+        program: Program,
+        size: Geometry,
+    },
+    /// As [`Command::OpenWindow`] when no window is open; else
+    /// [`Reply::Done`].
+    OpenFirstWindow {
         program: Program,
         size: Geometry,
     },
@@ -124,6 +148,8 @@ pub enum Command {
     },
     /// Reads the config file again.
     ReloadConfig,
+    /// Closes every pane and stops the server.
+    KillServer,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -270,6 +296,8 @@ pub enum Event {
     },
     OpenUrl(String),
     Hover(Option<Hover>),
+    /// A newer UI attached; this one hears nothing more.
+    Detached,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

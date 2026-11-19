@@ -98,10 +98,12 @@ impl Pane {
         geometry: Geometry,
         config: &Config,
         mut spawn: Spawn,
+        env: &[(OsString, OsString)],
         wake: &Wake,
     ) -> io::Result<Self> {
         let terminal = Terminal::new(geometry, config).map_err(io::Error::other)?;
         spawn.env = shell_env(id);
+        spawn.env.extend_from_slice(env);
         let wake = Arc::clone(wake);
         let pty = Pty::spawn(&spawn, window_size(geometry), move || wake())?;
         let mut pane = Self {
