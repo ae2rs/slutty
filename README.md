@@ -29,7 +29,7 @@ Needs macOS 13 or later.
 Needs Rust 1.96 and [Zig](https://ziglang.org) 0.17 on `PATH`: the build compiles libghostty-vt.
 
 ```sh
-cargo install --locked --git https://github.com/ae2rs/slutty --tag v0.1.1
+cargo install --locked --git https://github.com/ae2rs/slutty --tag v0.2.0
 ```
 
 - A bare binary has no desktop notifications: macOS only lets an app bundle post them.
