@@ -79,6 +79,10 @@ pub struct PaneDraw<'a> {
     /// Rows not built by then wait for a later frame, and the frame stays
     /// changed. `None` builds them all.
     pub deadline: Option<Instant>,
+    /// Drawn over the pane, untinted, in device pixels from its corner.
+    pub rects: Vec<RectInstance>,
+    /// Drawn over the other panes and the `rects` of [`Renderer::render`].
+    pub floating: bool,
 }
 
 pub struct Renderer {
@@ -137,9 +141,10 @@ impl Renderer {
         self.scenes.clear();
     }
 
-    /// Draws the panes into `surface` over `clear` (transparent when `None`),
-    /// then `rects` (device pixels from the top-left), then the `chrome`
-    /// lines, leaving out what `shown` hides. The surface keeps the
+    /// Draws the tiled panes into `surface` over `clear` (transparent when
+    /// `None`), then `rects` (device pixels from the top-left), then the
+    /// floating panes in order, then the `chrome` lines, leaving out what
+    /// `shown` hides. The surface keeps the
     /// instances, so [`Renderer::redraw`] can draw them again.
     pub fn render(
         &mut self,
@@ -212,23 +217,15 @@ impl Renderer {
         self.upload_glyphs();
 
         let viewport = [size.width as f32, size.height as f32];
-        let mut batches = Vec::new();
-        for pane in panes.iter() {
-            let Some(s) = self.scenes.get(&pane.id) else { continue };
-            let uniforms = Uniforms { viewport, origin: pane.origin, tint: pane.tint };
-            let overlay = if pane.overlay.cursor_blinks(pane.frame.cursor) { Zone::Cursor } else { Zone::Always };
-            batches.extend([
-                (uniforms, Zone::Always, Batch::Rects(&s.rects)),
-                (uniforms, Zone::Always, Batch::Glyphs(&s.glyphs)),
-                (uniforms, Zone::Text, Batch::Rects(&s.blink_rects)),
-                (uniforms, Zone::Text, Batch::Glyphs(&s.blink_glyphs)),
-                (uniforms, overlay, Batch::Rects(&s.overlay_rects)),
-                (uniforms, overlay, Batch::Glyphs(&s.overlay_glyphs)),
-            ]);
-        }
         let screen = Uniforms { viewport, origin: [0.0, 0.0], tint: Tint::NONE };
+        let pane_batches = |floating: bool| {
+            let panes = panes.iter().filter(move |p| p.floating == floating);
+            panes.filter_map(|pane| Some(batches_of(self.scenes.get(&pane.id)?, pane, viewport))).flatten()
+        };
+        let mut batches: Vec<_> = pane_batches(false).collect();
+        batches.push((screen, Zone::Always, Batch::Rects(rects)));
+        batches.extend(pane_batches(true));
         batches.extend([
-            (screen, Zone::Always, Batch::Rects(rects)),
             (screen, Zone::Always, Batch::Rects(&self.chrome.rects)),
             (screen, Zone::Always, Batch::Glyphs(&self.chrome.glyphs)),
         ]);
@@ -405,6 +402,21 @@ enum Batch<'a> {
     Glyphs(&'a [GlyphInstance]),
 }
 
+/// What draws `pane`, in order: its scene, then its own rects.
+fn batches_of<'a>(s: &'a Scene, pane: &'a PaneDraw<'_>, viewport: [f32; 2]) -> [(Uniforms, Zone, Batch<'a>); 7] {
+    let uniforms = Uniforms { viewport, origin: pane.origin, tint: pane.tint };
+    let overlay = if pane.overlay.cursor_blinks(pane.frame.cursor) { Zone::Cursor } else { Zone::Always };
+    [
+        (uniforms, Zone::Always, Batch::Rects(&s.rects)),
+        (uniforms, Zone::Always, Batch::Glyphs(&s.glyphs)),
+        (uniforms, Zone::Text, Batch::Rects(&s.blink_rects)),
+        (uniforms, Zone::Text, Batch::Glyphs(&s.blink_glyphs)),
+        (uniforms, overlay, Batch::Rects(&s.overlay_rects)),
+        (uniforms, overlay, Batch::Glyphs(&s.overlay_glyphs)),
+        (Uniforms { tint: Tint::NONE, ..uniforms }, Zone::Always, Batch::Rects(&pane.rects)),
+    ]
+}
+
 fn pack(device: &Device, batches: &[(Uniforms, Zone, Batch<'_>)], clear: Option<Rgb>, atlas: u64) -> Packed {
     // Buffer offsets must be aligned; 256 suits every Apple GPU.
     const ALIGN: usize = 256;
@@ -550,7 +562,8 @@ mod tests {
 
     fn pane(frame: &mut Frame, tint: Tint) -> PaneDraw<'_> {
         let overlay = Overlay { focused: false, copy_cursor: None, preedit: "" };
-        PaneDraw { id: "1".parse().expect("pane id"), frame, origin: [0.0, 0.0], overlay, tint, deadline: None }
+        let id = "1".parse().expect("pane id");
+        PaneDraw { id, frame, origin: [0.0, 0.0], overlay, tint, deadline: None, rects: Vec::new(), floating: false }
     }
 
     fn pixel(background: Rgb, tint: Tint) -> [u8; 4] {
@@ -626,6 +639,8 @@ mod tests {
                 overlay,
                 tint: Tint::NONE,
                 deadline,
+                rects: Vec::new(),
+                floating: false,
             }]);
         }
         assert!(offscreen.renderer.atlas.generation() > generation + 1, "the atlas filled more than once");
@@ -633,10 +648,32 @@ mod tests {
         // Once the flood is over, a frame with no deadline builds the rest.
         let overlay = Overlay { focused: false, copy_cursor: None, preedit: "" };
         let mut frame = t.frame();
-        let mut panes =
-            [PaneDraw { id, frame: &mut frame, origin: [0.0, 0.0], overlay, tint: Tint::NONE, deadline: None }];
+        let mut panes = [PaneDraw {
+            id,
+            frame: &mut frame,
+            origin: [0.0, 0.0],
+            overlay,
+            tint: Tint::NONE,
+            deadline: None,
+            rects: Vec::new(),
+            floating: false,
+        }];
         offscreen.prepare(&mut panes);
         assert!(!panes[0].frame.changed, "the screen is complete");
+    }
+
+    #[test]
+    fn floats_cover_the_tiled_panes_and_the_rects() {
+        let mut offscreen = Offscreen::new();
+        let (red, blue) = (Rgb { r: 200, g: 0, b: 0 }, Rgb { r: 0, g: 0, b: 200 });
+        let (mut under, mut over) = (blank_frame(red), blank_frame(blue));
+        let float = PaneDraw { id: "2".parse().expect("pane id"), floating: true, ..pane(&mut over, Tint::NONE) };
+        // The float comes first, yet draws last.
+        let mut panes = [float, pane(&mut under, Tint::NONE)];
+        let green = [RectInstance::new([0.0, 0.0], [4.0, 4.0], [0, 200, 0, 255])];
+        let size = CGSize::new(Offscreen::SIZE as f64, Offscreen::SIZE as f64);
+        let packed = offscreen.renderer.prepare(size, &mut panes, &green, &[], None);
+        assert_eq!(offscreen.pixel(&packed, Shown::ALL), [0, 0, 200, 255]);
     }
 
     #[test]

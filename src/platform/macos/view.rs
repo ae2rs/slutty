@@ -5,6 +5,7 @@
 //! that is paused while nothing changes paces the frames.
 
 use std::cell::{Cell, OnceCell, RefCell};
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
@@ -647,10 +648,12 @@ impl TerminalView {
             }
             let active = mirror.active_pane(window);
             let dividers = mirror.window(window).map(|w| w.dividers.clone()).unwrap_or_default();
+            let floats: Vec<PaneId> =
+                mirror.window(window).map(|w| w.floats.iter().map(|(id, _)| *id).collect()).unwrap_or_default();
             // Copied before the frames, which hold the mirror borrowed.
             let overlays: Vec<(PaneId, crate::proto::PaneOverlay)> = mirror
                 .window(window)
-                .map(|w| w.panes.iter().filter_map(|(id, _)| Some((*id, mirror.overlay(*id)?.clone()))).collect())
+                .map(|w| w.shown().filter_map(|(id, _)| Some((id, mirror.overlay(id)?.clone()))).collect())
                 .unwrap_or_default();
             let visible = mirror.visible(window);
             if !overlay_dirty && !visible.iter().any(|(_, _, frame)| frame.changed) {
@@ -682,16 +685,18 @@ impl TerminalView {
                 line.push_str(&format!(" {label} "), rgb(theme.background), BOLD);
                 chrome.push(line);
             }
-            let span_rect = |rect: Rect, row: u16, start: u16, end: u16, color: [u8; 4]| {
+            // Drawn with their pane, so a float covers those of the panes below.
+            let mut pane_rects: BTreeMap<PaneId, Vec<RectInstance>> = BTreeMap::new();
+            let span_rect = |row: u16, start: u16, end: u16, color: [u8; 4]| {
                 let size = [f32::from(end.saturating_sub(start)) * cw, ch];
-                RectInstance::new(cell(rect.x + start, rect.y + row), size, color)
+                RectInstance::new([f32::from(start) * cw, f32::from(row) * ch], size, color)
             };
             let tint = |c: config::Rgb, alpha: u8| [c[0], c[1], c[2], alpha];
             for (id, overlay) in &overlays {
                 let Some(&(_, rect, _)) = visible.iter().find(|(p, ..)| p == id) else { continue };
                 for h in &overlay.highlights {
                     let color = if h.current { tint(theme.ansi[3], 128) } else { tint(theme.ansi[4], 80) };
-                    rects.push(span_rect(rect, h.row, h.start, h.end, color));
+                    pane_rects.entry(*id).or_default().push(span_rect(h.row, h.start, h.end, color));
                 }
                 if let Mode::Search(search) = &overlay.mode {
                     let [x, y] = cell(rect.x, rect.y + rect.rows.saturating_sub(1));
@@ -706,7 +711,8 @@ impl TerminalView {
             {
                 for m in quick.shown() {
                     let span = &m.span;
-                    rects.push(span_rect(rect, span.row, span.start, span.end, tint(theme.ansi[4], 80)));
+                    let color = tint(theme.ansi[4], 80);
+                    pane_rects.entry(quick.pane).or_default().push(span_rect(span.row, span.start, span.end, color));
                     let [x, y] = cell(rect.x + span.start, rect.y + span.row);
                     let width = m.label.chars().count() as f32 * cw;
                     let mut line = Line::new(x, y, width, rgb(theme.ansi[3]));
@@ -714,14 +720,11 @@ impl TerminalView {
                     chrome.push(line);
                 }
             }
-            if let Some(hover) = &*ivars.hover.borrow()
-                && let Some(&(_, rect, _)) = visible.iter().find(|(p, ..)| *p == hover.pane)
-            {
-                let [x, y] = cell(rect.x + hover.start, rect.y + hover.row);
+            if let Some(hover) = &*ivars.hover.borrow() {
                 let width = f32::from(hover.end.saturating_sub(hover.start)) * cw;
                 let [r, g, b] = theme.foreground;
-                let pos = [x, y + m.underline_offset as f32];
-                rects.push(RectInstance::new(pos, [width, stroke], [r, g, b, 255]));
+                let pos = [f32::from(hover.start) * cw, f32::from(hover.row) * ch + m.underline_offset as f32];
+                pane_rects.entry(hover.pane).or_default().push(RectInstance::new(pos, [width, stroke], [r, g, b, 255]));
             }
             let mut cursor = None;
             let mut cursor_blinks = false;
@@ -739,7 +742,14 @@ impl TerminalView {
                     let overlay = Overlay { focused: focused && is_active, copy_cursor, preedit };
                     cursor_blinks |= is_active && overlay.cursor_blinks(frame.cursor);
                     let tint = if split && !is_active { INACTIVE } else { Tint::NONE };
-                    PaneDraw { id, frame, origin, overlay, tint, deadline }
+                    let mut rects = pane_rects.remove(&id).unwrap_or_default();
+                    let floating = floats.contains(&id);
+                    if floating {
+                        let [r, g, b] = if is_active { theme.ansi[4] } else { theme.split };
+                        let size = [f32::from(rect.cols) * cw, f32::from(rect.rows) * ch];
+                        rects.extend(outline(size, stroke, [r, g, b, 255]));
+                    }
+                    PaneDraw { id, frame, origin, overlay, tint, deadline, rects, floating }
                 })
                 .collect();
             ivars.cursor_blinks.set(cursor_blinks);
@@ -922,7 +932,7 @@ impl TerminalView {
         let ivars = self.ivars();
         let layout = ivars.layout.get();
         let m = app.renderer.metrics();
-        let panes = &app.mirror.window(ivars.window)?.panes;
+        let window = app.mirror.window(ivars.window)?;
         let corner = |rect: Rect| {
             let x = f64::from(layout.origin[0] + u32::from(rect.x) * m.cell_width);
             let y = f64::from(layout.origin[1] + u32::from(rect.y) * m.cell_height);
@@ -934,8 +944,9 @@ impl TerminalView {
             )
         };
         let (pane, rect) = match ivars.mouse_pane.get() {
-            Some(captured) => *panes.iter().find(|(id, _)| *id == captured)?,
-            None => *panes.iter().find(|(_, rect)| {
+            Some(captured) => (captured, window.rect(captured)?),
+            // From the top: floats first.
+            None => window.shown().rev().find(|(_, rect)| {
                 let (left, top, right, bottom) = corner(*rect);
                 (left..right).contains(&x) && (top..bottom).contains(&y)
             })?,
@@ -1170,8 +1181,13 @@ impl TerminalView {
     /// Labels the visible panes; the next key picks one.
     pub(super) fn start_pane_select(&self) {
         let window = self.ivars().window;
-        let Some(panes) = with_app(|app| app.mirror.window(window).map(|w| w.panes.clone())).flatten() else { return };
-        *self.ivars().pane_labels.borrow_mut() = PANE_LABELS.chars().zip(panes.iter().map(|(id, _)| *id)).collect();
+        let Some(panes) =
+            with_app(|app| app.mirror.window(window).map(|w| w.shown().map(|(id, _)| id).collect::<Vec<_>>()))
+                .flatten()
+        else {
+            return;
+        };
+        *self.ivars().pane_labels.borrow_mut() = PANE_LABELS.chars().zip(panes).collect();
         self.ivars().overlay_dirty.set(true);
         self.request_frame();
     }
@@ -1228,6 +1244,17 @@ const BOLD: CellStyle = CellStyle {
     blink: false,
     wide: false,
 };
+
+/// A line of `stroke` just outside a box of `size` at the origin, so it hides
+/// no cell of the box.
+fn outline([w, h]: [f32; 2], stroke: f32, color: [u8; 4]) -> [RectInstance; 4] {
+    [
+        RectInstance::new([-stroke, -stroke], [w + 2.0 * stroke, stroke], color),
+        RectInstance::new([-stroke, h], [w + 2.0 * stroke, stroke], color),
+        RectInstance::new([-stroke, 0.0], [stroke, h], color),
+        RectInstance::new([w, 0.0], [stroke, h], color),
+    ]
+}
 
 /// Panes without the keyboard, as WezTerm's default `inactive_pane_hsb`.
 const INACTIVE: Tint = Tint { saturation: 0.9, brightness: 0.8 };

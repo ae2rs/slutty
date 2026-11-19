@@ -123,7 +123,7 @@ impl TerminalView {
     fn drag_point(&self, app: &App, point: [f64; 2]) -> Option<(PaneId, Pointer, bool)> {
         let (pane, at) = self.pointer(app, point)?;
         let window = app.mirror.window(self.mux_window())?;
-        let rows = window.panes.iter().find(|(id, _)| *id == pane)?.1.rows;
+        let rows = window.rect(pane)?.rows;
         let height = f32::from(rows) * app.renderer.metrics().cell_height as f32;
         Some((pane, at, at.y < 0.0 || at.y >= height))
     }
