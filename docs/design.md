@@ -12,7 +12,6 @@ slutty is a terminal emulator and multiplexer for macOS. It replaces WezTerm.
 ## Non-goals (for now)
 
 - Linux. Platform code stays behind a seam so a port is possible later.
-- A detachable mux server. The design leaves room for it (see [Mux server](#mux-server-later)).
 - Lua or any scripting. Config is declarative TOML.
 
 ## Stack
@@ -59,28 +58,33 @@ libghostty-vt is a C library. It turns the bytes a program writes into terminal 
 
 ## Layers
 
+Two processes: the app draws, the server owns the panes.
+
 ```
-          ┌──────────────────────────────┐
-          │ platform/macos               │  AppKit app, windows, views, input, IME
-          └──────┬────────────────┬──────┘
-   input events  │                │  draw requests
-          ┌──────▼──────┐   ┌─────▼──────┐
-          │ mux         │──▶│ renderer   │  Metal, glyph atlas
-          │ panes, tabs │   └─────┬──────┘
-          └──────┬──────┘         │
-          ┌──────▼──────┐   ┌─────▼──────┐
-          │ terminal    │   │ font       │  CoreText
-          │ libghostty  │   └────────────┘
-          └──────┬──────┘
-          ┌──────▼──────┐
-          │ pty         │  child process, reader and writer threads
-          └─────────────┘
-               config (read by all)
+  app (slutty)                              server (slutty server)
+  ┌──────────────────────────────┐
+  │ platform/macos               │          ┌─────────────┐
+  │ AppKit, windows, input, IME  │          │ server      │  session, socket,
+  └──────┬────────────────┬──────┘          │             │  client threads
+         │                │                 └──────┬──────┘
+  ┌──────▼──────┐   ┌─────▼──────┐   proto  ┌──────▼──────┐
+  │ client      │◀─▶│ renderer   │◀ ─ ─ ─ ▶ │ mux         │  windows, tabs, panes
+  │ mirror      │   │ Metal      │  socket  └──────┬──────┘
+  └─────────────┘   └─────┬──────┘          ┌──────▼──────┐
+                    ┌─────▼──────┐          │ terminal    │  libghostty
+                    │ font       │          └──────┬──────┘
+                    └────────────┘          ┌──────▼──────┐
+                                            │ pty         │  child processes
+                                            └─────────────┘
+               config (read by both)
 ```
 
 ### Modules
 
 - `pty`: spawn a process on a PTY. Resize. Reader and writer threads. Knows nothing about terminals.
+- `proto`: the messages between the server and its clients, and how they cross the socket.
+- `server`: the server process. Owns the mux and answers clients.
+- `client`: reaching the server, the app's connection to it, and the mirror of what it shows.
 - `terminal`: one libghostty terminal per pane. Feeds bytes in, wires effects, exposes a render snapshot.
 - `mux`: the model. Windows hold tabs, tabs hold a layout of panes. No AppKit types.
 - `font`: faces, metrics, glyph lookup and rasterisation.
@@ -90,26 +94,37 @@ libghostty-vt is a C library. It turns the bytes a program writes into terminal 
 
 ### Rules between layers
 
-- `mux`, `terminal` and `pty` never import `platform` or `renderer`. This keeps a mux server and a Linux port possible.
-- The platform calls into the mux with plain events (key, text, mouse, resize, focus). The mux answers with damage: which pane needs a frame.
-- The platform owns the event loop. The mux never blocks.
+- `mux`, `terminal`, `pty` and `server` never import `platform` or `renderer`. This keeps the server headless and a Linux port possible.
+- The platform never touches a pane. It sends commands and input, and draws from the mirror.
+- The platform owns the event loop. Nothing it does waits on the server.
 
 ## Threads
 
-- **Main thread.** Runs the AppKit loop. Owns the mux, every terminal and the renderer.
-- **One reader thread per pane.** Blocks on `read()` of the PTY. Sends each chunk over a channel. Wakes the main thread.
-- **One writer thread per pane.** Blocks on a channel and writes to the PTY. A child that stops reading never blocks the UI.
+### Server
 
-### Waking the main thread
+- **Mux thread.** The thread that runs `server::run`. Owns the session, the mux and every terminal. Blocks on one channel.
+- **Acceptor thread.** Accepts clients.
+- **Per client: a reader and a writer thread.** The reader passes messages to the mux thread. The writer sends what the mux thread queues, so a slow client never blocks the mux.
+- **Per pane: a reader and a writer thread** on the PTY, as before.
+- **Signal thread.** Turns SIGTERM, SIGINT and SIGHUP into a stop.
+- All of them run in one `thread::scope`, so none outlives the server.
 
-- The reader sets an atomic "pending" flag. Only the first set dispatches a block to the GCD main queue. Bursts become one wake.
-- On wake, the main thread clears the flag, drains the channel into the terminal, and asks for a frame if the render state is dirty.
+### App
 
-### Why not a terminal thread
+- **Main thread.** Runs the AppKit loop. Owns the mirror and the renderer.
+- **Server reader and writer threads.** The reader queues messages and wakes the main thread. The writer keeps a slow server from blocking AppKit.
 
-- libghostty-vt parses at GB/s. Parsing on the main thread is cheap.
-- One owner means no lock and no `unsafe impl Send`.
-- Drawing can be slow, though: a screen of glyphs never seen before costs ~235 ms of CoreText shaping and rasterising (267×66 CJK cells). Floods keep reading fast with fewer and bounded frames (below). If that is not enough, move the mux to its own thread. The rule above (no AppKit in the mux) keeps that move small.
+### Waking
+
+- A PTY reader sets an atomic "pending" flag. Only the first set sends a wake to the mux thread. Bursts become one wake.
+- The app does the same with the GCD main queue when a message arrives.
+- The mux thread drains its channel, parses waiting output, then sends the UI what changed.
+
+### Why one mux thread
+
+- libghostty-vt parses at GB/s. One thread is enough.
+- A `Terminal` is `!Send`. One owner means no lock and no `unsafe impl Send`.
+- Drawing can be slow: a screen of glyphs never seen before costs ~235 ms of CoreText work (267×66 CJK cells). It now runs in another process, so parsing never waits on it.
 
 ## Rendering
 
@@ -205,8 +220,8 @@ libghostty-vt is a C library. It turns the bytes a program writes into terminal 
 
 - `openpty`, then `fork`/`exec` through `std::process::Command` with `setsid` and `TIOCSCTTY` in `pre_exec`.
 - Shell from `getpwuid`, started as a login shell (`argv[0]` is `-zsh`), in `$HOME`.
-- `slutty -- <command> [<arg>...]` runs the command in the first window instead, as is, in the current directory, found on `PATH`. New tabs, splits and windows still start the shell. The app quits when the command exits, as the last window closes.
-- Environment: `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=slutty`.
+- `slutty -- <command> [<arg>...]` opens a new window running the command, as is, in the current directory, found on `PATH`. New tabs, splits and windows still start the shell.
+- Environment: `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=slutty`, `SLUTTY_PANE` (the pane's id) and `SLUTTY_SOCKET` (the server's socket).
 - Resize with `TIOCSWINSZ`. The kernel sends `SIGWINCH`.
 - EOF on the reader means the child is gone. Reap it with `waitpid`, then close the pane.
 
@@ -456,34 +471,57 @@ defaults = true                # false starts from an empty table, like disable_
 ### Code layout
 
 - `config` holds the types, their `Default`, and the loader. Other modules take the typed structs and never see TOML.
-- Reload swaps an `Rc<Config>` on the main thread and marks every pane fully dirty.
+- The app watches the file. On a change it reloads its own settings and sends `ReloadConfig`. The server then reads the file again and applies it to every terminal. There is one watcher, and `Config` never crosses the socket.
 
-## Mux server (later)
+## Mux server
 
-Not built now. This is what keeps it cheap to add.
+The panes run in `slutty server`. The app attaches to it. Quitting or crashing the app only detaches.
 
-### The seam
+### Processes
 
-- The mux owns panes and terminals. It never touches AppKit or Metal.
-- The UI talks to the mux through two plain types:
-  - `MuxCommand`: key, text, mouse, paste, resize, spawn, split, close, focus, scroll.
-  - `MuxEvent`: pane damaged, title changed, cwd changed, bell, pane exited, layout changed.
-- In-process, commands are method calls and events go through a queue the UI drains on the main thread.
+- One binary, two roles: `slutty [--socket PATH] [-- cmd…]` is the app, `slutty server [--daemon] [--socket PATH]` the server.
+- Only the app starts a server. When it cannot connect, it runs `slutty server --daemon` and waits for one byte on its stdout.
+- The daemon forks while it has one thread, so the app can reap the first process. The child calls `setsid` and logs to `~/Library/Logs/slutty/server.log`.
 
-### Adding a server
+### Socket
 
-1. Move the mux into a `slutty-mux` daemon process, started on demand, listening on a Unix socket in `$TMPDIR`.
-2. Serialise `MuxCommand` and `MuxEvent` with a small binary framing.
-3. Ship screen contents, not bytes. The server keeps the libghostty terminal; the client gets row updates from the render state's dirty rows (row id, cells, styles). The client keeps a mirror and draws it.
-4. Detach closes the socket. Panes live on. Attach sends one full frame, then dirty rows.
+- `~/Library/Application Support/slutty/mux.sock`, in a 0700 directory. `--socket`, then `$SLUTTY_SOCKET`, override it.
+- Not `$TMPDIR` or `/tmp`: macOS cleans old files there, and the socket would vanish.
+- One server per socket: it holds a `flock` on `mux.lock` next to the socket. A server that loses the race exits quietly.
+- A socket left by a crash is removed: the free lock proves its server is gone.
 
-### Why rows and not raw bytes
+### Lifecycle
 
-- The client never re-parses VT, so attach is instant and memory stays in one place.
-- Dirty rows are already what the renderer wants.
-- libghostty's row ids let the client follow rows as they scroll.
+- The server exits when its last window closes, on `KillServer`, or on SIGTERM, SIGINT or SIGHUP. It removes the socket.
+- Closing a window kills its panes, as before.
+- One app at a time. The newest wins: the older one gets `Detached` and quits, so a hung app never locks you out.
+- The app quits when the server goes away.
+- `slutty` opens a window only when the server has none. `slutty -- cmd` always opens one.
+- Launching the app inside a pane without `--socket` is refused: it would take over from the app the pane is in.
 
-### What must not happen before then
+### Protocol
 
-- No AppKit type or callback in `mux`, `terminal` or `pty`.
-- No direct reads of a `Terminal` from the platform layer; go through the mux.
+- Each side first sends 12 raw bytes: `SLTY`, the protocol version and its pid. They never change, so two versions always tell they differ.
+- Versions must match exactly. On a mismatch the app offers to restart the server, which stops the old one by its pid.
+- Then each message is a `u32` LE length and a [postcard](https://docs.rs/postcard) body, at most 16 MiB.
+- The client's first message is `Hello { role: Ui | Cli }`.
+- `Request { id, Command }` gets a `Response { id, Result<Reply, String> }`. Key bindings and the CLI send the same commands.
+- `Input` is the app's: keys, mouse, scroll, focus, resize, selection, copy-mode and search keys, hover, and `Drawn`. It is never answered.
+- `Event`s go to the app: window states, pane updates, clipboard, notifications, links, `Detached`.
+
+### Rows, not bytes
+
+- The server keeps the terminals. A `PaneUpdate` carries the rows that changed, with the cursor, colours and the pane's mode.
+- The app keeps a mirror and draws from it. It never parses VT, so attach is instant and memory stays in one place.
+- Attach sends every visible pane whole.
+
+### Flow control
+
+- After a `PaneUpdate`, the server sends no more for that pane until the app's `Drawn` names it.
+- Meanwhile dirty rows add up on the server. A flood sends at most one update per frame, and parsing never waits on drawing.
+- Synchronized-output holds are timed on the server.
+
+### Keys never wait
+
+- Copy-mode and search keys are read in the app from the mirrored mode, then sent as commands.
+- Results, such as copied text or the link under the pointer, come back as events.

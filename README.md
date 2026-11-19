@@ -38,8 +38,16 @@ cargo install --locked --git https://github.com/ae2rs/slutty --tag v0.1.1
 
 ## Usage
 
-- `slutty` opens a window with your login shell.
-- `slutty -- <command> [<arg>...]` runs the command in the first window instead.
+- `slutty` opens a window with your login shell, or shows the windows already running.
+- `slutty -- <command> [<arg>...]` opens a new window running the command.
+
+### Sessions
+
+Panes run in a server process, `slutty server`, which the app starts by itself. Quitting the app, or a crash, only detaches: launch it again and every window comes back. The server stops when its last window closes.
+
+- Socket: `~/Library/Application Support/slutty/mux.sock`. `--socket PATH` or `$SLUTTY_SOCKET` picks another, for a separate set of windows.
+- Log: `~/Library/Logs/slutty/server.log`.
+- Each pane gets `SLUTTY_PANE` (its id) and `SLUTTY_SOCKET`.
 
 ### Keys
 
