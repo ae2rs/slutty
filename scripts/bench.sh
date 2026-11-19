@@ -8,6 +8,10 @@
 # main monitor, so it fills the same screen every time. Writes raw results to
 # docs/bench/<setup>/<terminal>/ and prints a summary.
 #
+# slutty runs on a socket of its own under target/bench, so it never
+# attaches to the server of the slutty in use, and its server is counted
+# with the app: memory and CPU are app plus server.
+#
 # Every run raises a window: start it, then leave the Mac alone until it ends
 # (about 15 minutes). It stops if the keyboard or mouse is used.
 # Usage: scripts/bench.sh [defaults|mine]...
@@ -19,6 +23,7 @@ out=$root/docs/bench
 work=$root/target/bench
 vte=$work/vtebench
 scrollback=100000
+socket=$work/mux.sock
 
 # Starts terminal $1 in setup $setup running `sh -c "$2"` once the window is
 # placed, and sets $launcher to the process it started. The command first
@@ -33,10 +38,10 @@ start() {
     case $1-$setup in
     slutty-defaults)
         # An empty config directory: slutty's defaults.
-        XDG_CONFIG_HOME=$work/config target/release/slutty -- sh -c "$command" &
+        XDG_CONFIG_HOME=$work/config target/release/slutty --socket "$socket" -- sh -c "$command" &
         ;;
     slutty-mine)
-        target/release/slutty -- sh -c "$command" &
+        target/release/slutty --socket "$socket" -- sh -c "$command" &
         ;;
     wezterm-defaults)
         wezterm -n --config font_size=16 --config scrollback_lines=$scrollback \
@@ -52,6 +57,8 @@ start() {
     esac
     launcher=$!
     place
+    # slutty's panes run in its server, started by the app.
+    server=$(pgrep -f "slutty server --daemon --socket $socket" || true)
 }
 
 # Moves the started terminal's window alone onto the empty workspace $bench_ws,
@@ -104,11 +111,14 @@ await() {
     done
 }
 
-# Ends the started terminal, whether or not it closed by itself.
+# Ends the started terminal, whether or not it closed by itself, and
+# slutty's server, which outlives the app.
 stop() {
     kill "${pid:-$launcher}" "$launcher" 2> /dev/null || true
     wait "$launcher" 2> /dev/null || true
+    pkill -f "slutty server --daemon --socket $socket" 2> /dev/null || true
     pid=
+    server=
     sleep 2
 }
 
@@ -122,10 +132,13 @@ away() {
     fi
 }
 
-# Physical footprint and resident size of $pid, in one line.
+# Physical footprint and resident size of $pid and of slutty's server, one
+# line each.
 memory() {
-    footprint=$(footprint -p "$pid" | sed -n 's/.*Footprint: \(.*\) (.*/\1/p')
-    echo "footprint $footprint, rss $(ps -o rss= -p "$pid" | tr -d ' ') KB"
+    for p in $pid ${server:-}; do
+        footprint=$(footprint -p "$p" | sed -n 's/.*Footprint: \(.*\) (.*/\1/p')
+        echo "pid $p: footprint $footprint, rss $(ps -o rss= -p "$p" | tr -d ' ') KB"
+    done
 }
 
 throughput() {
@@ -139,10 +152,12 @@ idle() {
     start "$1" "touch '$work/ready'; exec sleep 600"
     await
     sleep 5
-    echo "launch: $(memory)" > "$dir/memory.txt"
-    before=$(ps -o time= -p "$pid")
-    top -l 4 -s 20 -pid "$pid" -stats pid,cpu,idlew,time > "$dir/idle.txt"
-    echo "cpu time: $before -> $(ps -o time= -p "$pid")" >> "$dir/idle.txt"
+    echo "launch:" > "$dir/memory.txt"
+    memory >> "$dir/memory.txt"
+    pids=$pid${server:+,$server}
+    before=$(ps -o time= -p "$pids" | tr '\n' ' ')
+    top -l 4 -s 20 -pid "$pid" ${server:+-pid "$server"} -stats pid,cpu,idlew,time > "$dir/idle.txt"
+    echo "cpu time: $before-> $(ps -o time= -p "$pids" | tr '\n' ' ')" >> "$dir/idle.txt"
     stop
 }
 
@@ -151,7 +166,8 @@ scrollback() {
     start "$1" "awk 'BEGIN { for (i = 1; i <= 2 * $scrollback; i++) printf \"%06d the quick brown fox jumps over the lazy dog 0123456789 abcdefghij\\n\", i }'; touch '$work/ready'; exec sleep 600"
     await
     sleep 5
-    echo "full scrollback: $(memory)" >> "$dir/memory.txt"
+    echo "full scrollback:" >> "$dir/memory.txt"
+    memory >> "$dir/memory.txt"
     stop
 }
 
