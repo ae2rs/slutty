@@ -61,7 +61,7 @@ slutty cli send-text --pane-id 3 'make test'
 slutty cli get-text --pane-id 3 --start-line -100
 ```
 
-Also `spawn`, `place-pane`, `hide-pane`, `show-pane`, `activate-pane`, `activate-pane-direction`, `adjust-pane-size`, `zoom-pane`, `kill-pane` and `kill-server`; `slutty cli help` lists them. A command acts on `--pane-id`, else on the pane it runs in, else on the focused pane. It exits 1 when the server refuses and 2 on bad arguments.
+Also `spawn`, `place-pane`, `hide-pane`, `show-pane`, `activate-pane`, `activate-pane-direction`, `adjust-pane-size`, `zoom-pane`, `kill-pane` and `kill-server`; `slutty cli help` lists them. A command acts on `--pane-id`, else on the pane it runs in, else on the focused pane. It exits 1 when the server refuses and 2 on bad arguments. The full reference, with the JSON fields, is in [docs/cli.md](docs/cli.md).
 
 ### Keys
 
