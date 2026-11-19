@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::pane::{Pane, PaneInfo, Wake};
-use super::tree::{Axis, Direction, Layout};
+use super::tree::{Axis, Direction, Layout, Rect};
 use super::window::{Tab, Window};
 use super::{PaneId, WindowId};
 use crate::config::Config;
@@ -26,6 +26,19 @@ pub struct Pump {
     pub notifications: Vec<(PaneId, Notification)>,
 }
 
+/// Where a pane is. A pane hidden by a zoom keeps the place it had.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Placement {
+    pub window: WindowId,
+    pub tab: usize,
+    pub pane: PaneId,
+    pub rect: Rect,
+    /// The tab's active pane.
+    pub active: bool,
+    /// The tab is zoomed on this pane.
+    pub zoomed: bool,
+}
+
 /// One tab as the tab bar shows it.
 pub struct TabView<'a> {
     /// The tab's active pane.
@@ -40,6 +53,8 @@ pub struct Mux {
     wake: Wake,
     /// Set in every pane on top of the terminal's own.
     env: Vec<(OsString, OsString)>,
+    /// The window that had the keyboard last.
+    last_focused: Option<WindowId>,
     buf: Vec<u8>,
 }
 
@@ -53,6 +68,7 @@ impl Mux {
             next_id: 0,
             wake: Arc::new(wake),
             env,
+            last_focused: None,
             buf: Vec::new(),
         }
     }
@@ -258,6 +274,37 @@ impl Mux {
         Some(self.windows.get(&window)?.active_tab().active)
     }
 
+    /// Every pane, window by window and tab by tab, in reading order.
+    pub fn placements(&self) -> Vec<Placement> {
+        let mut placements = Vec::new();
+        for (&window, w) in &self.windows {
+            for (tab, t) in w.tabs().iter().enumerate() {
+                for (pane, rect) in t.tree.layout(w.area()).panes {
+                    let active = pane == t.active;
+                    placements.push(Placement { window, tab, pane, rect, active, zoomed: active && t.zoomed });
+                }
+            }
+        }
+        placements
+    }
+
+    /// The pane a request that names none goes to: the active pane of the
+    /// window focused last, else of the first window.
+    pub fn focused_pane(&self) -> Option<PaneId> {
+        let focused = self.last_focused.filter(|w| self.windows.contains_key(w));
+        self.active_pane(focused.or_else(|| self.windows.keys().next().copied())?)
+    }
+
+    /// The size of the window focused last, else of the first window.
+    pub fn usual_size(&self) -> Option<Geometry> {
+        let focused = self.last_focused.and_then(|w| self.windows.get(&w));
+        focused.or_else(|| self.windows.values().next()).map(|w| w.size)
+    }
+
+    pub fn info(&self, pane: PaneId) -> Option<&PaneInfo> {
+        self.panes.get(&pane).map(Pane::info)
+    }
+
     /// Whether closing `pane` would stop something other than a shell.
     pub fn pane_busy(&self, pane: PaneId) -> bool {
         self.panes.get(&pane).is_some_and(Pane::is_busy)
@@ -292,6 +339,9 @@ impl Mux {
     pub fn focus(&mut self, window: WindowId, focused: bool) {
         let Some(w) = self.windows.get_mut(&window) else { return };
         w.focused = focused;
+        if focused {
+            self.last_focused = Some(window);
+        }
         let pane = w.active_tab().active;
         if let Some(pane) = self.panes.get_mut(&pane) {
             pane.focus(focused);

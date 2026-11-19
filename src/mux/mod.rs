@@ -9,6 +9,6 @@ mod tree;
 mod window;
 
 pub use ids::{PaneId, WindowId};
-pub use model::Mux;
+pub use model::{Mux, Placement};
 pub use pane::{Pane, PaneInfo, RhoActivity};
 pub use tree::{Axis, Direction, Layout, Rect};
