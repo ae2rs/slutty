@@ -116,7 +116,7 @@ await() {
 stop() {
     kill "${pid:-$launcher}" "$launcher" 2> /dev/null || true
     wait "$launcher" 2> /dev/null || true
-    pkill -f "slutty server --daemon --socket $socket" 2> /dev/null || true
+    target/release/slutty cli --socket "$socket" kill-server 2> /dev/null || true
     pid=
     server=
     sleep 2
