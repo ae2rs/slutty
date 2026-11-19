@@ -26,21 +26,23 @@ use objc2_foundation::{
 use objc2_metal::MTLDevice;
 use objc2_quartz_core::{CADisplayLink, CALayer, CATransaction};
 
-use super::actions;
 use super::keys;
 use super::layout::Layout;
-use super::pointer::Hover;
 use super::quick_select::QuickSelect;
 use super::state::{self, App, with_app};
 use super::tab_bar::{self, Strip};
 use super::ticker;
 use crate::animation::Live;
+use crate::client::{ModeKey, mode_key};
 use crate::config::{self, Config, OptionAsAlt};
 use crate::keys::Outcome;
-use crate::mux::{Axis, ModeKey, PaneId, Rect, Visible, WindowId};
+use crate::mux::{Axis, PaneId, Rect, WindowId};
+use crate::proto::Hover;
+use crate::proto::{Command, Input, KeyEvent, Mode, ModeOp, MouseEvent};
 use crate::renderer::{Line, Overlay, PaneDraw, RectInstance, Renderer, Shown, Surface, Tint};
 use crate::status;
-use crate::terminal::{CellStyle, Highlight, KeyInput, MouseInput, SearchStatus};
+use crate::terminal::copy_mode;
+use crate::terminal::{CellStyle, SearchStatus};
 
 /// Output this recent makes a flood. A frame can take hundreds of
 /// milliseconds when a screen is full of glyphs never drawn before, and the
@@ -110,6 +112,8 @@ pub struct Ivars {
     /// An autoscroll step is scheduled.
     pub(super) autoscrolling: Cell<bool>,
     pub(super) hover: RefCell<Option<Hover>>,
+    /// The cell under the pointer last asked about for links.
+    pub(super) hover_cell: Cell<Option<(PaneId, u16, u16)>>,
     pub(super) quick: RefCell<Option<QuickSelect>>,
     /// While picking a pane, each pane's label; empty otherwise.
     pane_labels: RefCell<Vec<(char, PaneId)>>,
@@ -280,7 +284,8 @@ define_class!(
                     -(dy.signum() as isize) * isize::try_from(app.config().mouse.wheel_lines).unwrap_or(1)
                 };
                 if let Some((pane, x, y)) = self.pane_at(app, point) {
-                    pane_mut(app, pane, |p| p.scroll(lines, mods, x, y));
+                    let lines = i32::try_from(lines).unwrap_or(0);
+                    app.input(Input::Scroll { pane, lines, mods, x, y });
                 }
             });
             self.request_frame();
@@ -402,9 +407,8 @@ define_class!(
             if let Some(link) = self.ivars().link.get() {
                 link.invalidate();
             }
-            // Dropping the panes hangs up their shells and joins their threads.
             let window = self.ivars().window;
-            with_app(|app| app.mux.close_window(window));
+            with_app(|app| app.request(Command::CloseWindow { window }));
             state::remove_view(window);
         }
     }
@@ -455,6 +459,7 @@ impl TerminalView {
             drag: Cell::new(None),
             autoscrolling: Cell::new(false),
             hover: RefCell::new(None),
+            hover_cell: Cell::new(None),
             quick: RefCell::new(None),
             pane_labels: RefCell::new(Vec::new()),
         };
@@ -519,9 +524,9 @@ impl TerminalView {
     pub fn tabs_changed(&self) {
         let window = self.ivars().window;
         let title = with_app(|app| {
-            let tabs = app.mux.tabs(window);
-            let active = tabs.iter().position(|t| t.active)?;
-            let title = tabs[active].info.title();
+            let w = app.mirror.window(window)?;
+            let (tabs, active) = (&w.tabs, w.active_tab);
+            let title = tabs.get(active)?.info.title();
             let title = if title.is_empty() { "slutty" } else { title };
             // AeroSpace and rho find windows by this title.
             Some(if tabs.len() > 1 { format!("[{}/{}] {title}", active + 1, tabs.len()) } else { title.to_owned() })
@@ -549,7 +554,7 @@ impl TerminalView {
         let layout = with_app(|app| {
             let m = app.renderer.metrics();
             let layout = Layout::new(size, app.scale, m, app.config().window.padding, app.tab_bar);
-            app.mux.resize(window, layout.area);
+            app.input(Input::Resize { window, size: layout.area });
             layout
         });
         let Some(layout) = layout else { return };
@@ -593,7 +598,12 @@ impl TerminalView {
         let flooding = self.flooding(now);
         let marked = ivars.marked.borrow();
         let drawn = with_app(|app| {
-            let App { mux, renderer, settings, status, .. } = app;
+            // Whatever happens below, the server may send these panes again.
+            let undrawn = app.mirror.take_undrawn(window);
+            if !undrawn.is_empty() {
+                app.input(Input::Drawn { panes: undrawn });
+            }
+            let App { mirror, renderer, settings, status, .. } = app;
             let config = &settings.config;
             let m = renderer.metrics();
             let mut chrome = Vec::new();
@@ -606,8 +616,12 @@ impl TerminalView {
                 let status_end = cols.saturating_sub(tab_bar::EDGE);
                 // Tabs stop a cell short of the widest the stats can get.
                 let tab_cols = if shows_status { status_end.saturating_sub(status::width(items) + 1) } else { cols };
+                let tabs: Vec<_> = mirror.window(window).map_or_else(Vec::new, |w| {
+                    let tabs = w.tabs.iter().enumerate();
+                    tabs.map(|(i, tab)| tab_bar::TabView { active: i == w.active_tab, info: &tab.info }).collect()
+                });
                 let bar = tab_bar::build(
-                    &mux.tabs(window),
+                    &tabs,
                     &config.theme,
                     tab_cols,
                     config.tab_bar.max_width,
@@ -631,19 +645,14 @@ impl TerminalView {
             if let Some(err) = &settings.error {
                 chrome.push(banner(err, config, layout));
             }
-            let active = mux.active_pane(window);
-            // Read before the frames, which hold the panes borrowed.
-            let modes: Vec<(PaneId, PaneModes)> = mux
-                .layout(window)
-                .panes
-                .iter()
-                .filter_map(|(id, _)| {
-                    let pane = mux.pane_mut(*id)?;
-                    let highlights = pane.search_highlights();
-                    Some((*id, PaneModes { highlights, search: pane.search_status(), copy_cursor: pane.copy_cursor() }))
-                })
-                .collect();
-            let Visible { panes: visible, dividers } = mux.visible(window);
+            let active = mirror.active_pane(window);
+            let dividers = mirror.window(window).map(|w| w.dividers.clone()).unwrap_or_default();
+            // Copied before the frames, which hold the mirror borrowed.
+            let overlays: Vec<(PaneId, crate::proto::PaneOverlay)> = mirror
+                .window(window)
+                .map(|w| w.panes.iter().filter_map(|(id, _)| Some((*id, mirror.overlay(*id)?.clone()))).collect())
+                .unwrap_or_default();
+            let visible = mirror.visible(window);
             if !overlay_dirty && !visible.iter().any(|(_, _, frame)| frame.changed) {
                 return None;
             }
@@ -678,13 +687,13 @@ impl TerminalView {
                 RectInstance::new(cell(rect.x + start, rect.y + row), size, color)
             };
             let tint = |c: config::Rgb, alpha: u8| [c[0], c[1], c[2], alpha];
-            for (id, modes) in &modes {
+            for (id, overlay) in &overlays {
                 let Some(&(_, rect, _)) = visible.iter().find(|(p, ..)| p == id) else { continue };
-                for h in &modes.highlights {
+                for h in &overlay.highlights {
                     let color = if h.current { tint(theme.ansi[3], 128) } else { tint(theme.ansi[4], 80) };
                     rects.push(span_rect(rect, h.row, h.start, h.end, color));
                 }
-                if let Some(search) = &modes.search {
+                if let Mode::Search(search) = &overlay.mode {
                     let [x, y] = cell(rect.x, rect.y + rect.rows.saturating_sub(1));
                     let mut line = Line::new(x, y, f32::from(rect.cols) * cw, rgb(theme.selection_bg));
                     let text: String = search_bar(search).chars().take(usize::from(rect.cols)).collect();
@@ -726,7 +735,7 @@ impl TerminalView {
                         cursor = Some([origin[0] + f32::from(c.x) * cw, origin[1] + f32::from(c.y) * ch]);
                     }
                     let preedit = if is_active { marked.as_str() } else { "" };
-                    let copy_cursor = modes.iter().find(|(p, _)| *p == id).and_then(|(_, modes)| modes.copy_cursor);
+                    let copy_cursor = overlays.iter().find(|(p, _)| *p == id).and_then(|(_, o)| o.copy_cursor);
                     let overlay = Overlay { focused: focused && is_active, copy_cursor, preedit };
                     cursor_blinks |= is_active && overlay.cursor_blinks(frame.cursor);
                     let tint = if split && !is_active { INACTIVE } else { Tint::NONE };
@@ -895,7 +904,7 @@ impl TerminalView {
             });
         }
         let window = self.ivars().window;
-        with_app(|app| app.mux.focus(window, focused));
+        with_app(|app| app.input(Input::Focus { window, focused }));
         self.ivars().overlay_dirty.set(true);
         self.request_frame();
     }
@@ -909,11 +918,11 @@ impl TerminalView {
 
     /// The pane under a point, or the one a mouse button went down in, with
     /// the point relative to that pane.
-    pub(super) fn pane_at(&self, app: &mut App, [x, y]: [f64; 2]) -> Option<(PaneId, f32, f32)> {
+    pub(super) fn pane_at(&self, app: &App, [x, y]: [f64; 2]) -> Option<(PaneId, f32, f32)> {
         let ivars = self.ivars();
         let layout = ivars.layout.get();
         let m = app.renderer.metrics();
-        let panes = app.mux.layout(ivars.window).panes;
+        let panes = &app.mirror.window(ivars.window)?.panes;
         let corner = |rect: Rect| {
             let x = f64::from(layout.origin[0] + u32::from(rect.x) * m.cell_width);
             let y = f64::from(layout.origin[1] + u32::from(rect.y) * m.cell_height);
@@ -941,8 +950,7 @@ impl TerminalView {
         let Some(tab) = self.tab_at(self.pixel_point(event)) else { return false };
         if let Some(tab) = tab {
             let window = self.ivars().window;
-            with_app(|app| app.mux.activate_tab(window, tab));
-            self.tabs_changed();
+            with_app(|app| app.request(Command::ActivateTab { window, index: tab }));
         }
         true
     }
@@ -1000,21 +1008,18 @@ impl TerminalView {
             if !app.matcher.is_idle() {
                 return None;
             }
-            Some(app.mux.pane_mut(app.mux.active_pane(window)?)?.mode_key(press))
+            let pane = app.mirror.active_pane(window)?;
+            let mode = &app.mirror.overlay(pane)?.mode;
+            let key = mode_key(mode, app.jump_pending == Some(pane), press);
+            if let ModeKey::Op(op) = key {
+                app.jump_pending = matches!(op, ModeOp::Copy(copy_mode::Command::Jump(_))).then_some(pane);
+                app.input(Input::Mode { pane, op });
+            }
+            Some(key)
         });
         match mode.flatten() {
-            Some(ModeKey::Used) => {
+            Some(ModeKey::Op(_) | ModeKey::Swallow) => {
                 self.swallow(code);
-                self.request_frame();
-                return true;
-            }
-            Some(ModeKey::Closed(text)) => {
-                self.swallow(code);
-                if let Some(text) = text {
-                    actions::set_clipboard(&text);
-                }
-                self.ivars().overlay_dirty.set(true);
-                self.request_frame();
                 return true;
             }
             Some(ModeKey::Unused) | None => {}
@@ -1032,7 +1037,8 @@ impl TerminalView {
             Some(Outcome::Handled) => true,
             // A mode keeps the keys it does not know from the program.
             Some(Outcome::Unbound) | None => with_app(|app| {
-                app.mux.active_pane(window).and_then(|p| app.mux.pane_mut(p)).is_some_and(|p| p.in_mode())
+                let pane = app.mirror.active_pane(window);
+                pane.and_then(|p| app.mirror.overlay(p)).is_some_and(|o| o.mode != Mode::None)
             })
             .unwrap_or(false),
         };
@@ -1112,38 +1118,37 @@ impl TerminalView {
             .charactersByApplyingModifiers(NSEventModifierFlags(0))
             .and_then(|s| s.to_string().chars().next())
             .filter(|c| keys::is_text(c.encode_utf8(&mut [0; 4])));
-        let input = KeyInput {
+        self.send_key_event(KeyEvent {
             key: keys::key(event.keyCode()),
             action,
             mods: keys::mods(event.modifierFlags()),
             consumed,
-            text,
+            text: text.map(str::to_owned),
             unshifted,
-        };
-        self.with_active_pane(|pane| pane.key(&input));
+        });
     }
 
     fn send_text(&self, text: &str) {
-        let input = KeyInput {
+        self.send_key_event(KeyEvent {
             key: Key::Unidentified,
             action: key::Action::Press,
             mods: Mods::empty(),
             consumed: Mods::empty(),
-            text: Some(text),
+            text: Some(text.to_owned()),
             unshifted: None,
-        };
-        self.with_active_pane(|pane| pane.key(&input));
+        });
     }
 
-    /// Runs `f` on the active pane, then draws: input scrolls to the bottom.
-    pub fn with_active_pane(&self, f: impl FnOnce(&mut crate::mux::Pane)) {
+    pub(super) fn send_key_event(&self, key: KeyEvent) {
+        if let Some(pane) = self.active_pane() {
+            with_app(|app| app.input(Input::Key { pane, key }));
+        }
+    }
+
+    /// The pane keys go to.
+    pub(super) fn active_pane(&self) -> Option<PaneId> {
         let window = self.ivars().window;
-        with_app(|app| {
-            if let Some(pane) = app.mux.active_pane(window) {
-                pane_mut(app, pane, f);
-            }
-        });
-        self.request_frame();
+        with_app(|app| app.mirror.active_pane(window)).flatten()
     }
 
     pub(super) fn send_mouse(&self, event: &NSEvent, action: mouse::Action, button: Option<mouse::Button>) {
@@ -1151,11 +1156,9 @@ impl TerminalView {
         let point = self.pixel_point(event);
         with_app(|app| {
             let Some((pane, x, y)) = self.pane_at(app, point) else { return };
-            pane_mut(app, pane, |p| {
-                if p.mouse_tracking() {
-                    p.mouse(&MouseInput { action, button, mods, x, y });
-                }
-            });
+            if app.mirror.overlay(pane).is_some_and(|o| o.mouse_tracking) {
+                app.input(Input::Mouse { pane, mouse: MouseEvent { action, button, mods, x, y } });
+            }
         });
     }
 }
@@ -1167,9 +1170,8 @@ impl TerminalView {
     /// Labels the visible panes; the next key picks one.
     pub(super) fn start_pane_select(&self) {
         let window = self.ivars().window;
-        let Some(layout) = with_app(|app| app.mux.layout(window)) else { return };
-        *self.ivars().pane_labels.borrow_mut() =
-            PANE_LABELS.chars().zip(layout.panes.iter().map(|(id, _)| *id)).collect();
+        let Some(panes) = with_app(|app| app.mirror.window(window).map(|w| w.panes.clone())).flatten() else { return };
+        *self.ivars().pane_labels.borrow_mut() = PANE_LABELS.chars().zip(panes.iter().map(|(id, _)| *id)).collect();
         self.ivars().overlay_dirty.set(true);
         self.request_frame();
     }
@@ -1182,22 +1184,16 @@ impl TerminalView {
             return false;
         }
         let typed = event.charactersIgnoringModifiers().and_then(|s| s.to_string().chars().next());
-        let window = self.ivars().window;
         let code = event.keyCode();
         with_app(|app| {
             app.swallowed.push(code);
-            if let Some((_, pane)) = labels.iter().find(|(label, _)| Some(*label) == typed) {
-                app.mux.activate_pane(window, *pane);
+            if let Some(&(_, pane)) = labels.iter().find(|(label, _)| Some(*label) == typed) {
+                app.request(Command::ActivatePane { pane });
             }
         });
-        self.tabs_changed();
+        self.ivars().overlay_dirty.set(true);
+        self.request_frame();
         true
-    }
-}
-
-fn pane_mut(app: &mut App, pane: PaneId, f: impl FnOnce(&mut crate::mux::Pane)) {
-    if let Some(pane) = app.mux.pane_mut(pane) {
-        f(pane);
     }
 }
 
@@ -1221,13 +1217,6 @@ fn banner(error: &str, config: &Config, layout: Layout) -> Line {
     let text: String = format!(" {error}").chars().take(fits).collect();
     line.push_str(&text, rgb(theme.background), BOLD);
     line
-}
-
-/// What a pane's modes put on screen.
-struct PaneModes {
-    highlights: Vec<Highlight>,
-    search: Option<SearchStatus>,
-    copy_cursor: Option<(u16, u16)>,
 }
 
 const BOLD: CellStyle = CellStyle {

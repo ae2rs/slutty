@@ -9,6 +9,7 @@ use super::actions;
 use super::state::with_app;
 use super::view::TerminalView;
 use crate::mux::PaneId;
+use crate::proto::Command;
 use crate::scan::{self, Labelled, RowText};
 
 pub struct QuickSelect {
@@ -34,8 +35,8 @@ impl TerminalView {
     pub(super) fn start_quick_select(&self, open: bool) {
         let window = self.mux_window();
         let quick = with_app(|app| {
-            let pane = app.mux.active_pane(window)?;
-            let rows: Vec<RowText> = app.mux.pane_mut(pane)?.frame().rows.iter().map(RowText::new).collect();
+            let pane = app.mirror.active_pane(window)?;
+            let rows: Vec<RowText> = app.mirror.frame(pane)?.rows.iter().map(RowText::new).collect();
             let regex = if open { scan::url_pattern() } else { scan::default_patterns() };
             let matches = scan::find(&rows, regex);
             Some(QuickSelect { pane, matches, typed: String::new(), paste: false, open })
@@ -62,8 +63,9 @@ impl TerminalView {
             Some(text) if quick.open => actions::open_url(&text),
             Some(text) => {
                 actions::set_clipboard(&text);
+                let text = text.clone();
                 if quick.paste {
-                    with_app(|app| app.mux.pane_mut(quick.pane).map(|pane| pane.paste(&text)));
+                    with_app(|app| app.request(Command::Paste { pane: quick.pane, text }));
                 }
             }
             None if quick.shown().next().is_some() => *self.ivars().quick.borrow_mut() = Some(quick),

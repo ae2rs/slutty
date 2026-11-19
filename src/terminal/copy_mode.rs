@@ -90,11 +90,6 @@ impl CopyMode {
         self.cursor
     }
 
-    /// Whether the next character is a jump target rather than a command.
-    pub fn awaits_jump(&self) -> bool {
-        self.pending.is_some()
-    }
-
     pub fn apply(&mut self, grid: &impl Grid, command: Command) {
         match command {
             Command::Move(motion) => self.cursor = self.moved(grid, motion),
@@ -409,7 +404,6 @@ mod tests {
         let grid = text();
         let mut mode = CopyMode::new(at(0, 0));
         mode.apply(&grid, Command::Jump(Jump { forward: true, till: false }));
-        assert!(mode.awaits_jump());
         mode.jump_to(&grid, 'a');
         assert_eq!(mode.cursor(), at(5, 0));
         mode.apply(&grid, Command::Move(Motion::JumpAgain));

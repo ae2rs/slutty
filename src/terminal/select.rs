@@ -255,11 +255,6 @@ impl Terminal {
         self.copy.is_some()
     }
 
-    /// Whether copy mode waits for the character of an `f` or `t` jump.
-    pub fn copy_mode_awaits_jump(&self) -> bool {
-        self.copy.as_ref().is_some_and(CopyMode::awaits_jump)
-    }
-
     pub fn copy_mode(&mut self, command: Command) {
         let Some(mut copy) = self.copy.take() else { return };
         copy.apply(&ScreenGrid(&self.vt), command);

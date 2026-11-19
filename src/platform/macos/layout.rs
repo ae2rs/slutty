@@ -52,13 +52,13 @@ fn padding_pixels(p: Padding, m: Metrics, scale: f64) -> [u32; 4] {
     ]
 }
 
-/// Window content size, in points, that fits the configured grid.
-pub fn content_size(config: &Config, m: Metrics, scale: f64, tab_bar: bool) -> NSSize {
+/// Window content size, in points, that fits a grid of `cols` by `rows`.
+pub fn content_size(cols: u16, rows: u16, config: &Config, m: Metrics, scale: f64, tab_bar: bool) -> NSSize {
     let [left, right, top, bottom] = padding_pixels(config.window.padding, m, scale);
     let bar = if tab_bar { m.cell_height } else { 0 };
     NSSize::new(
-        f64::from(u32::from(config.window.cols) * m.cell_width + left + right) / scale,
-        f64::from(u32::from(config.window.rows) * m.cell_height + top + bottom + bar) / scale,
+        f64::from(u32::from(cols) * m.cell_width + left + right) / scale,
+        f64::from(u32::from(rows) * m.cell_height + top + bottom + bar) / scale,
     )
 }
 
@@ -72,7 +72,7 @@ mod tests {
     #[test]
     fn the_tab_bar_and_padding_come_off_the_pane_area() {
         let config = Config::default();
-        let size = content_size(&config, M, 2.0, true);
+        let size = content_size(config.window.cols, config.window.rows, &config, M, 2.0, true);
         let layout = Layout::new(size, 2.0, M, config.window.padding, true);
         assert_eq!((layout.area.cols, layout.area.rows), (config.window.cols, config.window.rows));
         assert_eq!(layout.origin, [10, 20]);

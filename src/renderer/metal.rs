@@ -1,4 +1,3 @@
-use std::cell::RefMut;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -72,7 +71,7 @@ impl Default for Tint {
 /// One pane to draw: its frame, where it goes, and what lies on top.
 pub struct PaneDraw<'a> {
     pub id: PaneId,
-    pub frame: RefMut<'a, Frame>,
+    pub frame: &'a mut Frame,
     /// Top-left corner in device pixels.
     pub origin: [f32; 2],
     pub overlay: Overlay<'a>,
@@ -239,7 +238,7 @@ impl Renderer {
     fn build(&mut self, panes: &mut [PaneDraw<'_>], chrome: &[Line]) -> Result<(), Full> {
         for pane in panes {
             let scene = self.scenes.entry(pane.id).or_default();
-            scene.build(&mut pane.frame, &pane.overlay, &self.fonts, &mut self.atlas, pane.deadline)?;
+            scene.build(pane.frame, &pane.overlay, &self.fonts, &mut self.atlas, pane.deadline)?;
         }
         self.chrome.build(chrome, &self.fonts, &mut self.atlas)
     }
@@ -481,7 +480,6 @@ fn err(message: &str) -> RenderError {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
 
     use objc2_metal::MTLStorageMode;
 
@@ -538,34 +536,27 @@ mod tests {
     }
 
     /// A blank pane of `background`, two cells wide.
-    fn blank_frame(background: Rgb) -> RefCell<Frame> {
+    fn blank_frame(background: Rgb) -> Frame {
         let blank = Cell { text: Grapheme::Empty, fg: background, bg: None, style: CellStyle::default() };
-        RefCell::new(Frame {
+        Frame {
             cols: 2,
             rows: vec![Row { cells: vec![blank; 2], dirty: true }],
             background,
             foreground: background,
             cursor: None,
             changed: true,
-        })
+        }
     }
 
-    fn pane<'a>(frame: &'a RefCell<Frame>, tint: Tint) -> PaneDraw<'a> {
+    fn pane(frame: &mut Frame, tint: Tint) -> PaneDraw<'_> {
         let overlay = Overlay { focused: false, copy_cursor: None, preedit: "" };
-        PaneDraw {
-            id: "1".parse().expect("pane id"),
-            frame: frame.borrow_mut(),
-            origin: [0.0, 0.0],
-            overlay,
-            tint,
-            deadline: None,
-        }
+        PaneDraw { id: "1".parse().expect("pane id"), frame, origin: [0.0, 0.0], overlay, tint, deadline: None }
     }
 
     fn pixel(background: Rgb, tint: Tint) -> [u8; 4] {
         let mut offscreen = Offscreen::new();
-        let frame = blank_frame(background);
-        let packed = offscreen.prepare(&mut [pane(&frame, tint)]);
+        let mut frame = blank_frame(background);
+        let packed = offscreen.prepare(&mut [pane(&mut frame, tint)]);
         offscreen.pixel(&packed, Shown::ALL)
     }
 
@@ -573,10 +564,10 @@ mod tests {
     fn a_blinking_cursor_is_left_out_in_its_hidden_phase() {
         let mut offscreen = Offscreen::new();
         let (black, red) = (Rgb { r: 0, g: 0, b: 0 }, Rgb { r: 255, g: 0, b: 0 });
-        let frame = blank_frame(black);
+        let mut frame = blank_frame(black);
         let cursor = Cursor { x: 0, y: 0, shape: CursorShape::Block, wide: false, color: Some(red), blinking: true };
-        frame.borrow_mut().cursor = Some(cursor);
-        let mut pane = pane(&frame, Tint::NONE);
+        frame.cursor = Some(cursor);
+        let mut pane = pane(&mut frame, Tint::NONE);
         pane.overlay.focused = true;
         let packed = offscreen.prepare(&mut [pane]);
         assert_eq!(offscreen.pixel(&packed, Shown::ALL), [255, 0, 0, 255]);
@@ -586,18 +577,15 @@ mod tests {
     #[test]
     fn a_surface_knows_when_its_text_blinks() {
         let mut offscreen = Offscreen::new();
-        let frame = blank_frame(Rgb { r: 0, g: 0, b: 0 });
+        let mut frame = blank_frame(Rgb { r: 0, g: 0, b: 0 });
         let mut surface = Surface::new(&offscreen.renderer.device, 1.0);
-        surface.packed = Some(offscreen.prepare(&mut [pane(&frame, Tint::NONE)]));
+        surface.packed = Some(offscreen.prepare(&mut [pane(&mut frame, Tint::NONE)]));
         assert!(!surface.blinks_text());
-        {
-            let mut frame = frame.borrow_mut();
-            let cell = &mut frame.rows[0].cells[0];
-            cell.text = Grapheme::Char('x');
-            cell.style.blink = true;
-            frame.rows[0].dirty = true;
-        }
-        surface.packed = Some(offscreen.prepare(&mut [pane(&frame, Tint::NONE)]));
+        let cell = &mut frame.rows[0].cells[0];
+        cell.text = Grapheme::Char('x');
+        cell.style.blink = true;
+        frame.rows[0].dirty = true;
+        surface.packed = Some(offscreen.prepare(&mut [pane(&mut frame, Tint::NONE)]));
         assert!(surface.blinks_text());
     }
 
@@ -633,7 +621,7 @@ mod tests {
             let deadline = Some(Instant::now());
             offscreen.prepare(&mut [PaneDraw {
                 id,
-                frame: t.frame(),
+                frame: &mut t.frame(),
                 origin: [0.0, 0.0],
                 overlay,
                 tint: Tint::NONE,
@@ -644,8 +632,9 @@ mod tests {
         assert_eq!(offscreen.renderer.atlas.size(), start, "one screen fits; the atlas only starts over");
         // Once the flood is over, a frame with no deadline builds the rest.
         let overlay = Overlay { focused: false, copy_cursor: None, preedit: "" };
+        let mut frame = t.frame();
         let mut panes =
-            [PaneDraw { id, frame: t.frame(), origin: [0.0, 0.0], overlay, tint: Tint::NONE, deadline: None }];
+            [PaneDraw { id, frame: &mut frame, origin: [0.0, 0.0], overlay, tint: Tint::NONE, deadline: None }];
         offscreen.prepare(&mut panes);
         assert!(!panes[0].frame.changed, "the screen is complete");
     }
@@ -653,9 +642,9 @@ mod tests {
     #[test]
     fn drawing_the_strip_keeps_the_panes_built() {
         let mut offscreen = Offscreen::new();
-        let frame = blank_frame(Rgb { r: 0, g: 0, b: 0 });
-        let id = pane(&frame, Tint::NONE).id;
-        offscreen.prepare(&mut [pane(&frame, Tint::NONE)]);
+        let mut frame = blank_frame(Rgb { r: 0, g: 0, b: 0 });
+        let id = pane(&mut frame, Tint::NONE).id;
+        offscreen.prepare(&mut [pane(&mut frame, Tint::NONE)]);
         offscreen.prepare(&mut []);
         assert!(offscreen.renderer.scenes.contains_key(&id));
     }

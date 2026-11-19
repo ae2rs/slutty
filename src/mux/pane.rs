@@ -93,9 +93,15 @@ pub struct Pane {
 
 impl Pane {
     /// Starts `spawn` with the terminal's environment.
-    pub(super) fn spawn(geometry: Geometry, config: &Config, mut spawn: Spawn, wake: &Wake) -> io::Result<Self> {
+    pub(super) fn spawn(
+        id: super::PaneId,
+        geometry: Geometry,
+        config: &Config,
+        mut spawn: Spawn,
+        wake: &Wake,
+    ) -> io::Result<Self> {
         let terminal = Terminal::new(geometry, config).map_err(io::Error::other)?;
-        spawn.env = shell_env();
+        spawn.env = shell_env(id);
         let wake = Arc::clone(wake);
         let pty = Pty::spawn(&spawn, window_size(geometry), move || wake())?;
         let mut pane = Self {
@@ -282,8 +288,9 @@ fn window_size(g: Geometry) -> WindowSize {
 }
 
 /// The environment the shell starts with, on top of ours.
-fn shell_env() -> Vec<(OsString, OsString)> {
+fn shell_env(id: super::PaneId) -> Vec<(OsString, OsString)> {
     let mut env = vec![
+        ("SLUTTY_PANE".into(), id.to_string().into()),
         ("TERM".into(), "xterm-256color".into()),
         ("COLORTERM".into(), "truecolor".into()),
         ("TERM_PROGRAM".into(), "slutty".into()),

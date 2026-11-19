@@ -1,7 +1,8 @@
 //! The left button and the pointer over panes: selecting text, copying it
 //! on release, opening links on a click, and showing links under the
 //! pointer. A program that tracks the mouse gets the button instead, unless
-//! shift is held, as in WezTerm.
+//! shift is held, as in WezTerm. The server does the selecting; this side
+//! says where the pointer is.
 
 use std::time::Duration;
 
@@ -10,25 +11,14 @@ use libghostty_vt::mouse;
 use objc2::DefinedClass;
 use objc2_app_kit::{NSCursor, NSEvent, NSEventModifierFlags};
 
-use super::actions;
 use super::state::{self, App, with_app};
 use super::view::TerminalView;
 use crate::mux::PaneId;
-use crate::scan::{self, RowText};
-use crate::terminal::{Pointer, Release, Terminal};
+use crate::proto::{Command, Gesture, Hover, Input};
+use crate::terminal::Pointer;
 
 /// How often a drag past an edge scrolls one more row.
 const AUTOSCROLL: Duration = Duration::from_millis(50);
-
-/// A link under the pointer: cells `start..end` of a viewport row.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Hover {
-    pub pane: PaneId,
-    pub row: u16,
-    pub start: u16,
-    pub end: u16,
-    pub url: String,
-}
 
 impl TerminalView {
     pub(super) fn left_down(&self, event: &NSEvent) {
@@ -36,26 +26,25 @@ impl TerminalView {
             return;
         }
         let point = self.pixel_point(event);
-        let flags = event.modifierFlags();
-        let shift = flags.contains(NSEventModifierFlags::Shift);
+        let shift = event.modifierFlags().contains(NSEventModifierFlags::Shift);
         let window = self.mux_window();
         // A click in another pane makes it active, and goes on to it.
-        let pane = with_app(|app| {
-            let (pane, ..) = self.pane_at(app, point)?;
-            if app.mux.active_pane(window) != Some(pane) {
-                app.mux.activate_pane(window, pane);
+        let target = with_app(|app| {
+            let (pane, at) = self.pointer(app, point)?;
+            if app.mirror.active_pane(window) != Some(pane) {
+                app.request(Command::ActivatePane { pane });
             }
-            Some((pane, app.mux.pane_mut(pane)?.mouse_tracking()))
+            let tracking = app.mirror.overlay(pane).is_some_and(|o| o.mouse_tracking);
+            Some((pane, at, tracking))
         })
         .flatten();
-        self.ivars().mouse_pane.set(pane.map(|(id, _)| id));
-        self.tabs_changed();
-        let to_program = pane.is_some_and(|(_, tracking)| tracking) && !shift;
+        self.ivars().mouse_pane.set(target.map(|(pane, ..)| pane));
+        let to_program = target.is_some_and(|(.., tracking)| tracking) && !shift;
         self.ivars().selecting.set(!to_program);
         if to_program {
             self.send_mouse(event, mouse::Action::Press, Some(mouse::Button::Left));
-        } else {
-            self.with_pointer(point, |terminal, at| terminal.select_press(at, shift));
+        } else if let Some((pane, at, _)) = target {
+            self.select(pane, Gesture::Press { at, extend: shift });
         }
     }
 
@@ -67,7 +56,9 @@ impl TerminalView {
         let point = self.pixel_point(event);
         let rectangle = event.modifierFlags().contains(NSEventModifierFlags::Option);
         self.ivars().drag.set(Some((point, rectangle)));
-        if self.with_pointer(point, |terminal, at| terminal.select_drag(at, rectangle)) == Some(true) {
+        let Some((pane, at, past)) = with_app(|app| self.drag_point(app, point)).flatten() else { return };
+        self.select(pane, Gesture::Drag { at, rectangle });
+        if past {
             self.schedule_autoscroll();
         }
     }
@@ -76,14 +67,8 @@ impl TerminalView {
         self.ivars().drag.set(None);
         if self.ivars().selecting.replace(false) {
             let point = self.pixel_point(event);
-            match self.with_pointer(point, |terminal, at| terminal.select_release(at)) {
-                Some(Release::Selected) => self.copy_selection(),
-                Some(Release::Clicked) => {
-                    if let Some(link) = self.link_at(point) {
-                        actions::open_url(&link.url);
-                    }
-                }
-                None => {}
+            if let Some((pane, at)) = with_app(|app| self.pointer(app, point)).flatten() {
+                self.select(pane, Gesture::Release { at });
             }
         } else {
             self.send_mouse(event, mouse::Action::Release, Some(mouse::Button::Left));
@@ -91,13 +76,25 @@ impl TerminalView {
         self.ivars().mouse_pane.set(None);
     }
 
-    /// Shows whether a link or a tab is under the pointer, and tells a
-    /// program that tracks all motion.
+    /// Shows whether a tab is under the pointer, asks what link is, and
+    /// tells a program that tracks all motion.
     pub(super) fn pointer_moved(&self, event: &NSEvent) {
         self.send_mouse(event, mouse::Action::Motion, None);
         let point = self.pixel_point(event);
         self.set_hover_tab(self.tab_at(point).flatten());
-        let hover = self.link_at(point);
+        let cell = with_app(|app| self.pointer(app, point)).flatten().map(|(pane, at)| (pane, at.col, at.row));
+        if self.ivars().hover_cell.replace(cell) == cell {
+            return;
+        }
+        match cell {
+            Some((pane, col, row)) => _ = with_app(|app| app.input(Input::Hover { pane, col, row })),
+            None => self.show_hover(None),
+        }
+    }
+
+    /// Shows the link the server found under the pointer, if any, and the
+    /// pointer that says so.
+    pub(super) fn show_hover(&self, hover: Option<Hover>) {
         let cursor = if hover.is_some() { NSCursor::pointingHandCursor() } else { NSCursor::IBeamCursor() };
         cursor.set();
         self.set_hover(hover);
@@ -111,32 +108,8 @@ impl TerminalView {
         }
     }
 
-    /// Puts the active pane's selection on the clipboard.
-    pub(super) fn copy_selection(&self) {
-        let window = self.mux_window();
-        let text = with_app(|app| app.mux.pane_mut(app.mux.active_pane(window)?)?.terminal().selection_text());
-        if let Some(text) = text.flatten() {
-            actions::set_clipboard(&text);
-        }
-    }
-
-    /// The link under a point: an OSC 8 link, else a URL in the text.
-    fn link_at(&self, point: [f64; 2]) -> Option<Hover> {
-        with_app(|app| {
-            let (pane, at) = self.pointer(app, point)?;
-            let pane_ref = app.mux.pane_mut(pane)?;
-            if let Some((start, end, url)) = pane_ref.terminal().hyperlink_at(at.col, at.row) {
-                return Some(Hover { pane, row: at.row, start, end, url });
-            }
-            let text = RowText::new(pane_ref.frame().rows.get(usize::from(at.row))?);
-            let span = scan::link_at(at.row, &text, at.col)?;
-            Some(Hover { pane, row: at.row, start: span.start, end: span.end, url: span.text })
-        })
-        .flatten()
-    }
-
     /// The pane under a point and the cell there.
-    fn pointer(&self, app: &mut App, point: [f64; 2]) -> Option<(PaneId, Pointer)> {
+    fn pointer(&self, app: &App, point: [f64; 2]) -> Option<(PaneId, Pointer)> {
         let (pane, x, y) = self.pane_at(app, point)?;
         let m = app.renderer.metrics();
         // Saturating casts: a point above or left of the pane is cell 0.
@@ -145,14 +118,18 @@ impl TerminalView {
         Some((pane, Pointer { col, row, x, y }))
     }
 
-    /// Runs `f` on the terminal of the pane under a point, then draws.
-    fn with_pointer<R>(&self, point: [f64; 2], f: impl FnOnce(&mut Terminal, Pointer) -> R) -> Option<R> {
-        let result = with_app(|app| {
-            let (pane, at) = self.pointer(app, point)?;
-            Some(f(app.mux.pane_mut(pane)?.terminal_mut(), at))
-        });
-        self.request_frame();
-        result.flatten()
+    /// As [`TerminalView::pointer`], and whether the point is above or below
+    /// the pane, where a drag scrolls.
+    fn drag_point(&self, app: &App, point: [f64; 2]) -> Option<(PaneId, Pointer, bool)> {
+        let (pane, at) = self.pointer(app, point)?;
+        let window = app.mirror.window(self.mux_window())?;
+        let rows = window.panes.iter().find(|(id, _)| *id == pane)?.1.rows;
+        let height = f32::from(rows) * app.renderer.metrics().cell_height as f32;
+        Some((pane, at, at.y < 0.0 || at.y >= height))
+    }
+
+    fn select(&self, pane: PaneId, gesture: Gesture) {
+        with_app(|app| app.input(Input::Select { pane, gesture }));
     }
 
     /// Scrolls on while a drag stays past an edge. The view is found again
@@ -176,7 +153,9 @@ impl TerminalView {
     fn autoscroll(&self) {
         self.ivars().autoscrolling.set(false);
         let Some((point, rectangle)) = self.ivars().drag.get() else { return };
-        if self.with_pointer(point, |terminal, at| terminal.select_autoscroll(at, rectangle)) == Some(true) {
+        let Some((pane, at, past)) = with_app(|app| self.drag_point(app, point)).flatten() else { return };
+        if past {
+            self.select(pane, Gesture::Autoscroll { at, rectangle });
             self.schedule_autoscroll();
         }
     }

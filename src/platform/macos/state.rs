@@ -1,5 +1,6 @@
-//! What every window shares: the mux, the renderer, the config and the key
-//! bindings. It lives on the main thread; PTY threads only wake it.
+//! What every window shares: the line to the mux server and the copy of what
+//! it shows, the renderer, the config and the key bindings. It lives on the
+//! main thread; other threads only wake it.
 //!
 //! Callers borrow it through [`with_app`] and must not call into AppKit
 //! while they do: AppKit may call back (closing a window, running an alert)
@@ -8,17 +9,21 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use dispatch2::{DispatchQueue, DispatchTime};
+use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 
 use super::view::TerminalView;
 use super::watch::Watcher;
+use crate::client::{Changes, Connection, Mirror, log_failure};
 use crate::config::{self, Config};
 use crate::font::Fonts;
 use crate::keys::Matcher;
-use crate::mux::{Mux, WindowId};
+use crate::mux::{PaneId, WindowId};
+use crate::proto::{Command, Input, Reply, ServerMessage};
 use crate::renderer::Renderer;
 use crate::status::Monitor;
 
@@ -31,7 +36,12 @@ pub struct Settings {
 }
 
 pub struct App {
-    pub mux: Mux,
+    pub connection: Connection,
+    pub mirror: Mirror,
+    /// Requests whose answer matters, by id.
+    pending: BTreeMap<u32, Pending>,
+    /// Copy mode in this pane waits for the character of an `f` or `t`.
+    pub jump_pending: Option<PaneId>,
     pub renderer: Renderer,
     pub settings: Settings,
     pub matcher: Matcher,
@@ -83,15 +93,32 @@ pub fn remove_view(window: WindowId) {
     drop(view);
 }
 
-/// Runs on a PTY reader thread when output is waiting.
+enum Pending {
+    /// The first window: without it the app has nothing to show.
+    FirstWindow,
+    /// A [`Reply::Busy`] asks the user, then sends the command again
+    /// without `confirm`.
+    Confirm { message: &'static str, command: Command },
+}
+
+/// A pump is scheduled and has not started.
+static WAKE_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Runs on any thread when the server has something to say. Bursts become
+/// one pump.
 pub fn wake_from_any_thread() {
-    DispatchQueue::main().exec_async(pump);
+    if !WAKE_PENDING.swap(true, Ordering::AcqRel) {
+        DispatchQueue::main().exec_async(pump);
+    }
 }
 
 impl App {
-    pub fn start(mux: Mux, renderer: Renderer, settings: Settings, scale: f64) {
+    pub fn start(connection: Connection, renderer: Renderer, settings: Settings, scale: f64) {
         let app = Self {
-            mux,
+            connection,
+            mirror: Mirror::default(),
+            pending: BTreeMap::new(),
+            jump_pending: None,
             renderer,
             font_size: settings.config.font.size,
             tab_bar: settings.config.tab_bar.enabled,
@@ -109,6 +136,27 @@ impl App {
 
     pub fn config(&self) -> &Config {
         &self.settings.config
+    }
+
+    pub fn request(&mut self, command: Command) {
+        self.connection.request(command);
+    }
+
+    /// Sends `command`, asking the user first if it would stop something
+    /// other than a shell; `command` must carry `confirm`.
+    pub fn request_confirmed(&mut self, message: &'static str, command: Command) {
+        let id = self.connection.request(command.clone());
+        self.pending.insert(id, Pending::Confirm { message, command });
+    }
+
+    /// Sends the request for the first window; the app quits if it fails.
+    pub fn request_first_window(&mut self, command: Command) {
+        let id = self.connection.request(command);
+        self.pending.insert(id, Pending::FirstWindow);
+    }
+
+    pub fn input(&mut self, input: Input) {
+        self.connection.input(input);
     }
 
     /// Loads the fonts at the current size and scale. On failure the old ones
@@ -143,7 +191,7 @@ impl App {
             return had_error;
         }
         log::info!("config reloaded");
-        self.mux.configure(new);
+        self.connection.request(Command::ReloadConfig);
         if new.keys != old.keys {
             self.matcher.reset();
         }
@@ -160,35 +208,96 @@ impl App {
     }
 }
 
-/// Parses waiting output and shows what changed.
+/// Reads what the server said and shows what changed.
 fn pump() {
-    let Some((pump, deadline)) = with_app(|app| (app.mux.pump(), app.mux.hold_deadline())) else { return };
-    if pump.more {
-        wake_from_any_thread();
-    }
-    if let Some(text) = &pump.clipboard {
-        super::actions::set_clipboard(text);
-    }
-    for (pane, notification) in &pump.notifications {
-        super::notify::post(*pane, notification);
-    }
+    WAKE_PENDING.store(false, Ordering::Release);
+    let received = with_app(|app| {
+        let mut changes = Changes::default();
+        let mut confirms = Vec::new();
+        for message in app.connection.receive() {
+            match message {
+                ServerMessage::Event(event) => app.mirror.apply(event, &mut changes),
+                ServerMessage::Response { id, result } => match (app.pending.remove(&id), result) {
+                    (Some(Pending::Confirm { message, command }), Ok(Reply::Busy)) => confirms.push((message, command)),
+                    (Some(Pending::FirstWindow), Err(err)) => {
+                        log::error!("starting the program failed: {err}");
+                        std::process::exit(1);
+                    }
+                    (_, result) => log_failure(&result),
+                },
+            }
+        }
+        if app
+            .jump_pending
+            .is_some_and(|pane| app.mirror.overlay(pane).is_none_or(|o| o.mode != crate::proto::Mode::Copy))
+        {
+            app.jump_pending = None;
+        }
+        (changes, confirms, app.connection.deadline())
+    });
+    let Some((changes, confirms, deadline)) = received else { return };
+    show(changes);
     if let Some(deadline) = deadline {
         schedule_hold_timeout(deadline);
     }
-    for window in &pump.redraw {
-        if let Some(view) = view(*window) {
-            view.output_arrived();
-        }
+    for confirm in confirms {
+        ask_and_send(confirm);
     }
-    for window in &pump.tabs {
+}
+
+fn show(changes: Changes) {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    if let Some(text) = &changes.clipboard {
+        super::actions::set_clipboard(text);
+    }
+    for (pane, notification) in &changes.notifications {
+        super::notify::post(*pane, notification);
+    }
+    for url in &changes.open_urls {
+        super::actions::open_url(url);
+    }
+    for window in &changes.opened {
+        super::app::show_window(mtm, *window);
+    }
+    for window in &changes.windows {
         if let Some(view) = view(*window) {
             view.tabs_changed();
         }
     }
-    for window in pump.closed {
+    for window in &changes.output {
+        if let Some(view) = view(*window) {
+            view.output_arrived();
+        }
+    }
+    if let Some(hover) = changes.hover {
+        let window = hover.as_ref().and_then(|h| with_app(|app| app.mirror.find(h.pane)).flatten());
+        for view in views() {
+            if Some(view.mux_window()) == window {
+                view.show_hover(hover.clone());
+            } else {
+                view.set_hover(None);
+            }
+        }
+    }
+    for window in changes.closed {
         if let Some(view) = view(window) {
             view.close_window();
         }
+    }
+}
+
+/// Asks before closing what runs more than a shell, and closes it if the
+/// user agrees.
+fn ask_and_send((message, command): (&'static str, Command)) {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    // The alert runs the event loop, so the app is not borrowed here.
+    if super::actions::alert(mtm, message, "A program is still running in it.", "Close") {
+        let command = match command {
+            Command::CloseTab { window, .. } => Command::CloseTab { window, confirm: false },
+            Command::ClosePane { pane, .. } => Command::ClosePane { pane, confirm: false },
+            other => other,
+        };
+        with_app(|app| app.request(command));
     }
 }
 
@@ -202,7 +311,7 @@ fn schedule_hold_timeout(deadline: Instant) {
     let when = DispatchTime::try_from(delay).unwrap_or(DispatchTime::NOW);
     let scheduled = DispatchQueue::main().after(when, || {
         with_app(|app| app.hold_timer = false);
-        views().iter().for_each(|view| view.request_frame());
+        pump();
     });
     if scheduled.is_err() {
         with_app(|app| app.hold_timer = false);

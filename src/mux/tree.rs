@@ -84,12 +84,13 @@ impl Tree {
         self.panes().contains(&pane)
     }
 
-    /// Puts `new` beside `target`, sharing its space evenly. Returns whether
-    /// `target` was found.
-    pub fn split(&mut self, target: PaneId, new: PaneId, axis: Axis) -> bool {
+    /// Puts `new` after `target`, taking `share` (0 to 1) of its space.
+    /// Returns whether `target` was found.
+    pub fn split(&mut self, target: PaneId, new: PaneId, axis: Axis, share: f32) -> bool {
         let Some(node) = self.root.find_mut(target) else { return false };
         let first = Box::new(Node::Leaf(target));
-        *node = Node::Split { axis, ratio: 0.5, first, second: Box::new(Node::Leaf(new)) };
+        let ratio = (1.0 - share).clamp(0.0, 1.0);
+        *node = Node::Split { axis, ratio, first, second: Box::new(Node::Leaf(new)) };
         true
     }
 
@@ -298,8 +299,8 @@ mod tests {
     /// 1 on the left; 2 above 3 on the right.
     fn three() -> Tree {
         let mut tree = Tree::new(p(1));
-        assert!(tree.split(p(1), p(2), Axis::Row));
-        assert!(tree.split(p(2), p(3), Axis::Column));
+        assert!(tree.split(p(1), p(2), Axis::Row, 0.5));
+        assert!(tree.split(p(2), p(3), Axis::Column, 0.5));
         tree
     }
 

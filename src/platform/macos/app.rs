@@ -9,17 +9,18 @@ use objc2_app_kit::{
     NSBackingStoreType, NSEventModifierFlags, NSMenu, NSMenuItem, NSScreen, NSWindow, NSWindowButton,
     NSWindowStyleMask, NSWindowTitleVisibility,
 };
-use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSObject, NSPoint, NSRect, NSString};
 
 use super::actions;
 use super::layout::{self, Layout};
 use super::notify;
 use super::state::{self, App, Settings, with_app};
 use super::view::TerminalView;
+use crate::client::Connection;
 use crate::config::{self, Config};
 use crate::font::Fonts;
-use crate::mux::{Mux, WindowId};
-use crate::pty::Spawn;
+use crate::mux::WindowId;
+use crate::proto::{Command, Program};
 use crate::renderer::Renderer;
 
 define_class!(
@@ -71,7 +72,7 @@ fn load_settings(path: Option<PathBuf>) -> Settings {
 }
 
 /// Opens one terminal window running `first` and runs the AppKit event loop.
-pub fn run(config_path: Option<PathBuf>, first: Spawn) -> ExitCode {
+pub fn run(config_path: Option<PathBuf>, first: Program) -> ExitCode {
     let Some(mtm) = MainThreadMarker::new() else {
         log::error!("slutty must start on the main thread");
         return ExitCode::FAILURE;
@@ -98,49 +99,41 @@ pub fn run(config_path: Option<PathBuf>, first: Spawn) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-    App::start(Mux::new(state::wake_from_any_thread), renderer, settings, scale);
+    let connection = Connection::local(settings.path.clone(), state::wake_from_any_thread);
+    App::start(connection, renderer, settings, scale);
 
     notify::start();
-    if !open_window(mtm, first, None) {
-        return ExitCode::FAILURE;
-    }
+    with_app(|app| app.request_first_window(window_request(app, first)));
     app.activate();
     app.run();
     ExitCode::SUCCESS
 }
 
-/// Opens a window with one tab running `spawn`, cascaded from `after` or
-/// else centered. Returns whether it opened.
-pub(super) fn open_window(mtm: MainThreadMarker, spawn: Spawn, after: Option<&NSWindow>) -> bool {
-    let opened = with_app(|app| {
-        let m = app.renderer.metrics();
-        let size = layout::content_size(app.config(), m, app.scale, app.tab_bar);
-        let layout = Layout::new(size, app.scale, m, app.config().window.padding, app.tab_bar);
-        let id = app.mux.open_window(layout.area, &app.settings.config, spawn)?;
-        Ok::<_, std::io::Error>((id, size))
-    });
-    match opened {
-        Some(Ok((id, size))) => {
-            show_window(mtm, id, size, after);
-            true
-        }
-        Some(Err(err)) => {
-            log::error!("starting the program failed: {err}");
-            false
-        }
-        None => false,
-    }
+/// Asks the server for a window running `program`, of the configured size.
+/// It shows once the server reports it.
+pub(super) fn open_window(program: Program) {
+    with_app(|app| app.request(window_request(app, program)));
 }
 
-/// Shows mux window `id` in an NSWindow whose content is `size` points,
-/// cascaded from `after` or else centered.
-pub(super) fn show_window(mtm: MainThreadMarker, id: WindowId, size: NSSize, after: Option<&NSWindow>) {
+fn window_request(app: &App, program: Program) -> Command {
+    let (config, m) = (app.config(), app.renderer.metrics());
+    let size = layout::content_size(config.window.cols, config.window.rows, config, m, app.scale, app.tab_bar);
+    let layout = Layout::new(size, app.scale, m, config.window.padding, app.tab_bar);
+    Command::OpenWindow { program, size: layout.area }
+}
+
+/// Shows mux window `id` in an NSWindow that fits its grid, cascaded from
+/// the key window or else centered.
+pub(super) fn show_window(mtm: MainThreadMarker, id: WindowId) {
     let made = with_app(|app| {
+        let grid = app.mirror.window(id)?.size;
         let m = app.renderer.metrics();
+        let size = layout::content_size(grid.cols, grid.rows, app.config(), m, app.scale, app.tab_bar);
         let layout = Layout::new(size, app.scale, m, app.config().window.padding, app.tab_bar);
-        (layout, app.renderer.device().retain(), app.scale)
+        Some((size, layout, app.renderer.device().retain(), app.scale))
     });
-    let Some((layout, device, scale)) = made else { return };
+    let Some((size, layout, device, scale)) = made.flatten() else { return };
+    let after = NSApplication::sharedApplication(mtm).keyWindow();
     // Made outside `with_app`: AppKit sizes the view as it starts, which
     // relays it out.
     let view = TerminalView::new(mtm, NSRect::new(NSPoint::new(0.0, 0.0), size), id, layout, &device, scale);

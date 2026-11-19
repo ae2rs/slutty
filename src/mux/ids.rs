@@ -16,6 +16,14 @@ impl std::fmt::Display for PaneId {
     }
 }
 
+impl std::str::FromStr for PaneId {
+    type Err = std::num::ParseIntError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse().map(Self)
+    }
+}
+
 #[cfg(test)]
 impl PaneId {
     pub fn for_test(id: u64) -> Self {
@@ -23,10 +31,9 @@ impl PaneId {
     }
 }
 
-impl std::str::FromStr for PaneId {
-    type Err = std::num::ParseIntError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        s.parse().map(Self)
+#[cfg(test)]
+impl WindowId {
+    pub fn for_test(id: u64) -> Self {
+        Self(id)
     }
 }

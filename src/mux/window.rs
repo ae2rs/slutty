@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn a_zoomed_tab_shows_only_its_active_pane() {
         let mut tab = Tab::new(PaneId(1));
-        tab.tree.split(PaneId(1), PaneId(2), super::super::tree::Axis::Row);
+        tab.tree.split(PaneId(1), PaneId(2), super::super::tree::Axis::Row, 0.5);
         tab.zoomed = true;
         let area = Rect { x: 0, y: 0, cols: 80, rows: 24 };
         assert_eq!(tab.layout(area).panes, vec![(PaneId(1), area)]);

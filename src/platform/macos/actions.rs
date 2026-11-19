@@ -11,16 +11,26 @@ use super::app;
 use super::state::{self, with_app};
 use super::view::TerminalView;
 use crate::keys::Action;
-use crate::mux::Axis;
-use crate::pty::Spawn;
-use crate::terminal::KeyInput;
+use crate::mux::{Axis, PaneId};
+use crate::proto::{Command, KeyEvent, Program};
 
 impl TerminalView {
     pub(super) fn run_action(&self, action: Action) {
         log::debug!("running {action:?}");
         let window = self.mux_window();
+        let pane = self.active_pane();
+        // What the action asks of the server about the active pane.
+        let on_pane = |command: fn(PaneId) -> Command| {
+            if let Some(pane) = pane {
+                with_app(|app| app.request(command(pane)));
+            }
+        };
         match action {
-            Action::Send { text } => self.with_active_pane(|pane| pane.send(text.as_bytes())),
+            Action::Send { text } => {
+                if let Some(pane) = pane {
+                    with_app(|app| app.request(Command::SendText { pane, text, paste: false }));
+                }
+            }
             Action::SendKey { key: chord } => {
                 let (key, mods, unshifted) = chord.encoding();
                 // A key with no command or control types its character.
@@ -28,9 +38,7 @@ impl TerminalView {
                     .filter(|_| !mods.intersects(Mods::CTRL | Mods::SUPER))
                     .map(|c| if mods.contains(Mods::SHIFT) { c.to_ascii_uppercase() } else { c }.to_string());
                 let consumed = if text.is_some() { mods & Mods::SHIFT } else { Mods::empty() };
-                let input =
-                    KeyInput { key, action: key::Action::Press, mods, consumed, text: text.as_deref(), unshifted };
-                self.with_active_pane(|pane| pane.key(&input));
+                self.send_key_event(KeyEvent { key, action: key::Action::Press, mods, consumed, text, unshifted });
             }
             Action::Paste => self.paste_clipboard(),
             Action::Quit => NSApplication::sharedApplication(self.mtm()).terminate(None),
@@ -43,99 +51,56 @@ impl TerminalView {
                     window.toggleFullScreen(None);
                 }
             }
-            Action::NewTab => {
-                if let Some(Err(err)) = with_app(|app| app.mux.new_tab(window, &app.settings.config)) {
-                    log::error!("opening a tab failed: {err}");
-                }
-                self.tabs_changed();
-            }
+            Action::NewTab => _ = with_app(|app| app.request(Command::NewTab { window, program: Program::default() })),
             Action::CloseTab { confirm } => {
-                let busy = with_app(|app| app.mux.active_tab_busy(window)).unwrap_or(false);
-                // The alert runs the event loop, so the app is not borrowed here.
-                if confirm
-                    && busy
-                    && !alert(self.mtm(), "Close this tab?", "A program is still running in it.", "Close")
-                {
-                    return;
-                }
-                if with_app(|app| app.mux.close_tab(window)) == Some(true) {
-                    self.close_window();
-                } else {
-                    self.tabs_changed();
-                }
+                with_app(|app| app.request_confirmed("Close this tab?", Command::CloseTab { window, confirm }));
             }
             Action::ActivateTab { index } => {
                 with_app(|app| {
-                    let count = app.mux.tabs(window).len();
+                    let count = app.mirror.window(window).map_or(0, |w| w.tabs.len());
                     if let Some(index) = index.resolve(count) {
-                        app.mux.activate_tab(window, index);
+                        app.request(Command::ActivateTab { window, index });
                     }
                 });
-                self.tabs_changed();
             }
             Action::ToggleTabBar => {
                 with_app(|app| app.tab_bar = !app.tab_bar);
                 state::views().iter().for_each(|view| view.relayout());
             }
             Action::NewWindow => {
-                let cwd = with_app(|app| app.mux.active_cwd(window)).flatten();
-                app::open_window(self.mtm(), Spawn::login_shell(cwd.as_deref()), self.window().as_deref());
+                let cwd = with_app(|app| app.mirror.active_cwd(window)).flatten();
+                app::open_window(Program { command: None, cwd });
             }
-            Action::PopPane | Action::PopTab => {
-                let popped = with_app(|app| {
-                    if action == Action::PopPane { app.mux.pop_pane(window) } else { app.mux.pop_tab(window) }
-                });
-                if let Some(popped) = popped.flatten() {
-                    app::show_window(self.mtm(), popped, self.bounds().size, self.window().as_deref());
-                    self.tabs_changed();
-                }
-            }
+            Action::PopPane => on_pane(|pane| Command::PopPane { pane }),
+            Action::PopTab => _ = with_app(|app| app.request(Command::PopTab { window })),
             Action::SplitRight | Action::SplitDown => {
                 let axis = if action == Action::SplitRight { Axis::Row } else { Axis::Column };
-                if let Some(Err(err)) = with_app(|app| app.mux.split(window, axis, &app.settings.config)) {
-                    log::error!("splitting failed: {err}");
+                if let Some(pane) = pane {
+                    let program = Program::default();
+                    with_app(|app| app.request(Command::Split { pane, axis, percent: None, program }));
                 }
-                self.tabs_changed();
             }
             Action::ClosePane { confirm } => {
-                let busy = with_app(|app| app.mux.active_pane_busy(window)).unwrap_or(false);
-                // The alert runs the event loop, so the app is not borrowed here.
-                if confirm
-                    && busy
-                    && !alert(self.mtm(), "Close this pane?", "A program is still running in it.", "Close")
-                {
-                    return;
-                }
-                if with_app(|app| app.mux.close_pane(window)) == Some(true) {
-                    self.close_window();
-                } else {
-                    self.tabs_changed();
+                if let Some(pane) = pane {
+                    with_app(|app| app.request_confirmed("Close this pane?", Command::ClosePane { pane, confirm }));
                 }
             }
             Action::FocusPane { direction } => {
-                with_app(|app| app.mux.focus_direction(window, direction));
-                self.tabs_changed();
+                if let Some(pane) = pane {
+                    with_app(|app| app.request(Command::ActivateDirection { pane, direction }));
+                }
             }
             Action::ResizePane { direction, cells } => {
-                with_app(|app| app.mux.resize_pane(window, direction, cells));
-                self.tabs_changed();
+                if let Some(pane) = pane {
+                    with_app(|app| app.request(Command::ResizePane { pane, direction, cells }));
+                }
             }
-            Action::ToggleZoom => {
-                with_app(|app| app.mux.toggle_zoom(window));
-                self.tabs_changed();
-            }
-            Action::RotatePanes => {
-                with_app(|app| app.mux.rotate_panes(window));
-                self.tabs_changed();
-            }
+            Action::ToggleZoom => on_pane(|pane| Command::ToggleZoom { pane }),
+            Action::RotatePanes => _ = with_app(|app| app.request(Command::RotatePanes { window })),
             Action::PaneSelect => self.start_pane_select(),
-            Action::Copy => self.copy_selection(),
-            Action::CopyMode => self.with_active_pane(|pane| pane.start_copy_mode()),
-            Action::Search => self.with_active_pane(|pane| {
-                // As WezTerm: start from the selected text.
-                let selected = pane.terminal().selection_text().unwrap_or_default();
-                pane.start_search(selected.lines().next().unwrap_or_default());
-            }),
+            Action::Copy => on_pane(|pane| Command::Copy { pane }),
+            Action::CopyMode => on_pane(|pane| Command::CopyMode { pane }),
+            Action::Search => on_pane(|pane| Command::Search { pane }),
             Action::QuickSelect => self.start_quick_select(false),
             Action::OpenUrl => self.start_quick_select(true),
             // The matcher runs these itself.
@@ -149,11 +114,9 @@ impl TerminalView {
         if let Some(text) = pasteboard.stringForType(unsafe { NSPasteboardTypeString }) {
             let text = text.to_string();
             self.restart_blink();
-            self.with_active_pane(|pane| {
-                if !pane.paste_into_search(&text) {
-                    pane.paste(&text);
-                }
-            });
+            if let Some(pane) = self.active_pane() {
+                with_app(|app| app.request(Command::Paste { pane, text }));
+            }
         }
     }
 }

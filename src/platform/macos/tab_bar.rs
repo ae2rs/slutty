@@ -9,7 +9,7 @@ use libghostty_vt::color::Rgb;
 use crate::animation;
 use crate::config::{self, Stat, Theme};
 use crate::font::Metrics;
-use crate::mux::{RhoActivity, TabView};
+use crate::mux::{PaneInfo, RhoActivity};
 use crate::renderer::Line;
 use crate::status::{self, Ink, Stats};
 use crate::terminal::CellStyle;
@@ -41,6 +41,13 @@ pub struct Spinner {
 /// the index, then the active pane's directory. Without `focused`, the bar
 /// greys out as WezTerm's `window_frame` does; rho's static marks keep their colors.
 /// An inactive tab under the pointer (`hover`) turns aqua.
+/// One tab as the tab bar shows it.
+pub struct TabView<'a> {
+    pub active: bool,
+    /// The tab's active pane.
+    pub info: &'a PaneInfo,
+}
+
 pub fn build(
     tabs: &[TabView<'_>],
     theme: &Theme,
@@ -170,7 +177,6 @@ fn dir_name(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mux::PaneInfo;
 
     fn text(bar: &TabBar) -> String {
         bar.line

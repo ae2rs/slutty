@@ -1,4 +1,5 @@
 mod animation;
+mod client;
 mod config;
 mod font;
 mod keys;
@@ -8,17 +9,18 @@ mod proto;
 mod pty;
 mod renderer;
 mod scan;
+mod server;
 mod status;
 mod terminal;
 
 use std::ffi::OsString;
 
-use pty::Spawn;
+use proto::Program;
 
 const USAGE: &str = "usage: slutty [-- <command> [<arg>...]]";
 
 fn main() -> std::process::ExitCode {
-    let Some(first) = first_spawn(std::env::args_os().skip(1)) else {
+    let Some(first) = first_program(std::env::args_os().skip(1)) else {
         eprintln!("{USAGE}");
         return std::process::ExitCode::from(2);
     };
@@ -27,16 +29,16 @@ fn main() -> std::process::ExitCode {
     platform::run(config::path(), first)
 }
 
-/// What the first window runs: the login shell, or the command after `--`.
-/// `None` for any other arguments.
-fn first_spawn(args: impl IntoIterator<Item = OsString>) -> Option<Spawn> {
+/// What the first window runs: the login shell, or the command after `--`
+/// in this directory. `None` for any other arguments.
+fn first_program(args: impl IntoIterator<Item = OsString>) -> Option<Program> {
     // The Finder may pass `-psn_<n>` to an app it opens.
     let mut args = args.into_iter().filter(|arg| !arg.as_encoded_bytes().starts_with(b"-psn_"));
     match args.next() {
-        None => Some(Spawn::login_shell(None)),
+        None => Some(Program::default()),
         Some(arg) if arg == "--" => {
             let program = args.next()?;
-            Some(Spawn::command(program.into(), args.collect()))
+            Some(Program { command: Some((program.into(), args.collect())), cwd: std::env::current_dir().ok() })
         }
         Some(_) => None,
     }
@@ -66,23 +68,23 @@ fn log_panics() {
 mod tests {
     use super::*;
 
-    fn parse(args: &[&str]) -> Option<Spawn> {
-        first_spawn(args.iter().map(OsString::from))
+    fn parse(args: &[&str]) -> Option<Program> {
+        first_program(args.iter().map(OsString::from))
     }
 
     #[test]
     fn no_argument_runs_the_login_shell() {
-        assert!(parse(&[]).is_some_and(|spawn| spawn.login && spawn.args.is_empty()));
-        assert!(parse(&["-psn_0_12345"]).is_some_and(|spawn| spawn.login));
+        assert_eq!(parse(&[]), Some(Program::default()));
+        assert_eq!(parse(&["-psn_0_12345"]), Some(Program::default()));
     }
 
     #[test]
     fn the_command_after_two_dashes_runs_as_is() {
-        let spawn = parse(&["--", "vtebench", "-b", "--"]).expect("a command");
-        assert_eq!(spawn.program, std::path::Path::new("vtebench"));
-        assert_eq!(spawn.args, ["-b", "--"]);
-        assert!(!spawn.login);
-        assert_eq!(spawn.cwd, None);
+        let program = parse(&["--", "vtebench", "-b", "--"]).expect("a command");
+        let (path, args) = program.command.expect("a command");
+        assert_eq!(path, std::path::Path::new("vtebench"));
+        assert_eq!(args, ["-b", "--"]);
+        assert_eq!(program.cwd, std::env::current_dir().ok());
     }
 
     #[test]

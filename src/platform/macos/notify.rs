@@ -23,6 +23,7 @@ use objc2_user_notifications::{
 
 use super::state::{self, with_app};
 use crate::mux::PaneId;
+use crate::proto;
 use crate::terminal::Notification;
 
 /// Where Homebrew puts AeroSpace; an app started from the Dock has no PATH.
@@ -54,7 +55,7 @@ define_class!(
             handler: &DynBlock<dyn Fn()>,
         ) {
             let id = response.notification().request().identifier().to_string();
-            // The center may call from any thread; the mux lives on the main one.
+            // The center may call from any thread; the app lives on the main one.
             DispatchQueue::main().exec_async(move || {
                 if let Some(pane) = id.split('.').next().and_then(|pane| pane.parse().ok()) {
                     reveal(pane);
@@ -120,9 +121,14 @@ pub fn post(pane: PaneId, notification: &Notification) {
 /// workspace.
 fn reveal(pane: PaneId) {
     let Some(mtm) = MainThreadMarker::new() else { return };
-    let Some(window) = with_app(|app| app.mux.reveal(pane)).flatten() else { return };
+    let Some(window) = with_app(|app| {
+        app.request(proto::Command::ActivatePane { pane });
+        app.mirror.find(pane)
+    })
+    .flatten() else {
+        return;
+    };
     let Some(view) = state::view(window) else { return };
-    view.tabs_changed();
     NSApplication::sharedApplication(mtm).activate();
     let Some(ns_window) = view.window() else { return };
     ns_window.makeKeyAndOrderFront(None);
