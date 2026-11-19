@@ -10,7 +10,7 @@ use libghostty_vt::mouse;
 use serde::{Deserialize, Serialize};
 
 use super::wire;
-use crate::mux::{Axis, Direction, PaneId, PaneInfo, Rect, WindowId};
+use crate::mux::{Axis, Direction, PaneId, PaneInfo, Rect, RhoActivity, WindowId};
 use crate::terminal::copy_mode;
 use crate::terminal::{Cursor, Geometry, Highlight, Notification, Pointer, Row, SearchStatus};
 
@@ -52,10 +52,11 @@ pub struct Program {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Command {
-    /// Opens a window running `program`, with a grid of `size`.
+    /// Opens a window running `program`, with a grid of `size`; with none,
+    /// of the size of the window focused last, else 80×24.
     OpenWindow {
         program: Program,
-        size: Geometry,
+        size: Option<Geometry>,
     },
     /// As [`Command::OpenWindow`] when no window is open; else
     /// [`Reply::Done`].
@@ -146,6 +147,16 @@ pub enum Command {
         text: String,
         paste: bool,
     },
+    /// Every pane: [`Reply::List`].
+    List,
+    /// Lines of `pane` as plain text: [`Reply::Text`]. Line 0 is the top row
+    /// of the screen and negative lines are scrollback; no `end` is the
+    /// bottom row.
+    GetText {
+        pane: PaneId,
+        start: i32,
+        end: Option<i32>,
+    },
     /// Reads the config file again.
     ReloadConfig,
     /// Closes every pane and stops the server.
@@ -161,6 +172,34 @@ pub enum Reply {
     },
     /// Not done: something other than a shell runs there.
     Busy,
+    List(Vec<PaneEntry>),
+    Text(String),
+}
+
+/// A pane as `slutty cli list` shows it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneEntry {
+    pub window_id: WindowId,
+    /// Counts from 0.
+    pub tab_index: usize,
+    pub pane_id: PaneId,
+    /// The pane's place in its tab, in cells. A pane hidden by a zoom keeps
+    /// the place it had.
+    pub x: u16,
+    pub y: u16,
+    pub cols: u16,
+    pub rows: u16,
+    pub title: String,
+    pub cwd: Option<PathBuf>,
+    /// The foreground program's name.
+    pub process: Option<String>,
+    pub rho: Option<RhoActivity>,
+    /// The active pane of its tab.
+    pub active: bool,
+    /// The pane requests go to when they name none.
+    pub focused: bool,
+    /// Its tab is zoomed on it.
+    pub zoomed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

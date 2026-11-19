@@ -42,6 +42,7 @@ pub struct PaneInfo {
 
 /// rho's state, from its `rho_activity` user variable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum RhoActivity {
     Working,
     Question,

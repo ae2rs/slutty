@@ -319,7 +319,7 @@ mod tests {
         let mut first = Client::connect(&socket, Role::Ui);
         let script = "printf marker; exec sleep 30";
         let program = Program { command: Some(("/bin/sh".into(), vec!["-c".into(), script.into()])), cwd: None };
-        let pane = match first.request(Command::OpenWindow { program, size: SIZE }) {
+        let pane = match first.request(Command::OpenWindow { program, size: Some(SIZE) }) {
             Ok(Reply::Spawned { pane, .. }) => pane,
             other => panic!("opening a window: {other:?}"),
         };

@@ -7,13 +7,17 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::config::{self, Config};
-use crate::mux::{Layout, Mux, Pane, PaneId, WindowId};
+use crate::mux::{Layout, Mux, Pane, PaneId, Placement, WindowId};
 use crate::proto::{
-    Command, Event, Gesture, Hover, Input, Mode, ModeOp, PaneOverlay, PaneUpdate, Program, Reply, TabState, WindowState,
+    Command, Event, Gesture, Hover, Input, Mode, ModeOp, PaneEntry, PaneOverlay, PaneUpdate, Program, Reply, TabState,
+    WindowState,
 };
 use crate::pty::Spawn;
 use crate::scan::{self, RowText};
-use crate::terminal::{KeyInput, MouseInput, Release};
+use crate::terminal::{Geometry, KeyInput, MouseInput, Release};
+
+/// A window the CLI opens while no other gives it a size.
+const DEFAULT_SIZE: Geometry = Geometry { cols: 80, rows: 24, cell_width: 16, cell_height: 32 };
 
 pub struct Session {
     mux: Mux,
@@ -97,12 +101,10 @@ impl Session {
         let spawned = |window, pane| Reply::Spawned { window, pane };
         match command {
             Command::OpenFirstWindow { .. } if !self.mux.is_empty() => Ok(Reply::Done),
-            Command::OpenWindow { program, size } | Command::OpenFirstWindow { program, size } => {
-                let spawn = spawn(program, None);
-                let (window, pane) = self.mux.open_window(size, &self.config, spawn).map_err(|e| e.to_string())?;
-                self.opened = true;
-                Ok(spawned(window, pane))
-            }
+            Command::OpenWindow { program, size } => self.open_window(program, size),
+            Command::OpenFirstWindow { program, size } => self.open_window(program, Some(size)),
+            Command::List => Ok(Reply::List(self.list())),
+            Command::GetText { pane, start, end } => Ok(Reply::Text(self.pane(pane)?.terminal().text(start, end))),
             Command::NewTab { window, program } => {
                 let spawn = spawn(program, self.mux.active_cwd(window));
                 let pane = self.mux.new_tab(window, &self.config, spawn).map_err(|e| e.to_string())?;
@@ -296,6 +298,38 @@ impl Session {
             }
         }
         events
+    }
+
+    fn open_window(&mut self, program: Program, size: Option<Geometry>) -> Result<Reply, String> {
+        let size = size.or_else(|| self.mux.usual_size()).unwrap_or(DEFAULT_SIZE);
+        let (window, pane) =
+            self.mux.open_window(size, &self.config, spawn(program, None)).map_err(|e| e.to_string())?;
+        self.opened = true;
+        Ok(Reply::Spawned { window, pane })
+    }
+
+    fn list(&self) -> Vec<PaneEntry> {
+        let focused = self.mux.focused_pane();
+        let entry = |p: Placement| {
+            let info = self.mux.info(p.pane).cloned().unwrap_or_default();
+            PaneEntry {
+                window_id: p.window,
+                tab_index: p.tab,
+                pane_id: p.pane,
+                x: p.rect.x,
+                y: p.rect.y,
+                cols: p.rect.cols,
+                rows: p.rect.rows,
+                title: info.title().to_owned(),
+                process: info.process.as_ref().map(|p| p.name().to_owned()),
+                cwd: info.cwd,
+                rho: info.rho,
+                active: p.active,
+                focused: focused == Some(p.pane),
+                zoomed: p.zoomed,
+            }
+        };
+        self.mux.placements().into_iter().map(entry).collect()
     }
 
     fn select(&mut self, pane: PaneId, gesture: Gesture) {
@@ -492,7 +526,7 @@ mod tests {
     }
 
     fn open(session: &mut Session, program: Program) -> (WindowId, PaneId) {
-        match session.request(Command::OpenWindow { program, size: SIZE }) {
+        match session.request(Command::OpenWindow { program, size: Some(SIZE) }) {
             Ok(Reply::Spawned { window, pane }) => (window, pane),
             other => panic!("opening a window: {other:?}"),
         }

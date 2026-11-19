@@ -6,7 +6,7 @@ mod transport;
 pub(crate) mod wire;
 
 pub use message::{
-    ClientMessage, Command, Event, Gesture, Hover, Input, KeyEvent, Mode, ModeOp, MouseEvent, PaneOverlay, PaneUpdate,
-    Program, Reply, Role, ServerMessage, TabState, WindowState,
+    ClientMessage, Command, Event, Gesture, Hover, Input, KeyEvent, Mode, ModeOp, MouseEvent, PaneEntry, PaneOverlay,
+    PaneUpdate, Program, Reply, Role, ServerMessage, TabState, WindowState,
 };
 pub use transport::{Header, VERSION, read_header, receive, send, socket_path, write_header};

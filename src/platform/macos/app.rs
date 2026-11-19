@@ -111,7 +111,7 @@ pub fn run(config_path: Option<PathBuf>, socket: &Path, first: Program) -> ExitC
         app.request_first_window(if program.command.is_none() {
             Command::OpenFirstWindow { program, size }
         } else {
-            Command::OpenWindow { program, size }
+            Command::OpenWindow { program, size: Some(size) }
         });
     });
     app.activate();
@@ -147,7 +147,7 @@ fn attach(mtm: MainThreadMarker, socket: &Path) -> Option<UnixStream> {
 pub(super) fn open_window(program: Program) {
     with_app(|app| {
         let size = window_size(app);
-        app.request(Command::OpenWindow { program, size });
+        app.request(Command::OpenWindow { program, size: Some(size) });
     });
 }
 
