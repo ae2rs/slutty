@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
 
-use crate::mux::{Direction, PaneId, WindowId};
+use crate::mux::{Anchor, Direction, Extent, PaneId, PlaceChange, WindowId};
 
 #[derive(Debug, Args)]
 pub struct Cli {
@@ -49,7 +49,39 @@ pub enum CliCommand {
         #[command(flatten)]
         program: ProgramArgs,
     },
-    /// Moves the divider nearest a pane.
+    /// Opens a floating pane over the tab of a pane, running PROG or the
+    /// login shell: centred, 80% by 80%, unless told otherwise. Prints the
+    /// new pane's id.
+    FloatPane {
+        #[command(flatten)]
+        pane: PaneArg,
+        #[command(flatten)]
+        place: PlaceArgs,
+        /// Starts it hidden, without the keys; show-pane shows it.
+        #[arg(long)]
+        hidden: bool,
+        #[command(flatten)]
+        program: ProgramArgs,
+    },
+    /// Moves or resizes a floating pane. What is not given stays.
+    PlacePane {
+        #[command(flatten)]
+        pane: PaneArg,
+        #[command(flatten)]
+        place: PlaceArgs,
+    },
+    /// Hides a floating pane. Its program runs on.
+    HidePane {
+        #[command(flatten)]
+        pane: PaneArg,
+    },
+    /// Shows a floating pane on top and gives it the keys.
+    ShowPane {
+        #[command(flatten)]
+        pane: PaneArg,
+    },
+    /// Moves the divider nearest a pane, or grows a floating pane: right
+    /// and down grow it.
     AdjustPaneSize {
         #[command(flatten)]
         pane: PaneArg,
@@ -118,6 +150,31 @@ pub struct PaneArg {
     pub pane_id: Option<PaneId>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Args)]
+pub struct PlaceArgs {
+    /// The point of the tab it sticks to.
+    #[arg(long, value_enum)]
+    pub anchor: Option<Anchor>,
+    /// 40% of the tab, or 40 cells.
+    #[arg(long)]
+    pub width: Option<Extent>,
+    #[arg(long)]
+    pub height: Option<Extent>,
+    /// Cells right of the anchored spot; negative goes left.
+    #[arg(long, allow_negative_numbers = true)]
+    pub x_offset: Option<i16>,
+    /// Cells below the anchored spot; negative goes up.
+    #[arg(long, allow_negative_numbers = true)]
+    pub y_offset: Option<i16>,
+}
+
+impl PlaceArgs {
+    pub fn change(&self) -> PlaceChange {
+        let Self { anchor, width, height, x_offset, y_offset } = *self;
+        PlaceChange { anchor, width, height, x_offset, y_offset }
+    }
+}
+
 #[derive(Debug, Args)]
 pub struct ProgramArgs {
     /// Where the program starts; else the pane's directory.
@@ -167,6 +224,34 @@ mod tests {
         assert_eq!(pane.pane_id, Some("7".parse().expect("id")));
         assert_eq!((start_line, end_line), (-20, Some(-1)));
         assert!(parse(&["get-text", "--pane-id", "seven"]).is_err());
+    }
+
+    #[test]
+    fn floats_take_an_anchor_sizes_and_signed_offsets() {
+        let Ok(CliCommand::FloatPane { place, hidden, program, .. }) = parse(&[
+            "float-pane",
+            "--anchor",
+            "top-right",
+            "--width",
+            "40%",
+            "--height",
+            "12",
+            "--x-offset",
+            "-2",
+            "--hidden",
+            "--",
+            "htop",
+        ]) else {
+            panic!("float-pane");
+        };
+        let change = place.change();
+        assert_eq!(change.anchor, Some(Anchor::TopRight));
+        assert_eq!((change.width, change.height), (Some(Extent::Percent(40)), Some(Extent::Cells(12))));
+        assert_eq!((change.x_offset, change.y_offset), (Some(-2), None));
+        assert!(hidden);
+        assert_eq!(program.command, ["htop"]);
+        assert!(parse(&["place-pane", "--width", "0"]).is_err());
+        assert!(parse(&["place-pane", "--anchor", "middle"]).is_err());
     }
 
     #[test]

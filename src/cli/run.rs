@@ -8,7 +8,7 @@ use std::process::ExitCode;
 
 use super::args::{Cli, CliCommand, Format, PaneArg, ProgramArgs};
 use crate::client;
-use crate::mux::{Axis, PaneId, WindowId};
+use crate::mux::{Axis, PaneId, Place, WindowId};
 use crate::proto::{self, ClientMessage, Command, PaneEntry, Program, Reply, Role, ServerMessage};
 
 pub fn run(socket: &Path, cli: Cli) -> ExitCode {
@@ -70,6 +70,24 @@ impl Server {
                 let pane = self.pane(socket, pane)?;
                 let axis = if right { Axis::Row } else { Axis::Column };
                 self.spawned(Command::Split { pane, axis, percent, program: program_of(program)? })
+            }
+            CliCommand::FloatPane { pane, place, hidden, program } => {
+                let pane = self.pane(socket, pane)?;
+                let mut at = Place::default();
+                place.change().apply(&mut at);
+                self.spawned(Command::FloatPane { pane, place: at, hidden, program: program_of(program)? })
+            }
+            CliCommand::PlacePane { pane, place } => {
+                let pane = self.pane(socket, pane)?;
+                self.done(Command::PlacePane { pane, change: place.change() })
+            }
+            CliCommand::HidePane { pane } => {
+                let pane = self.pane(socket, pane)?;
+                self.done(Command::HidePane { pane })
+            }
+            CliCommand::ShowPane { pane } => {
+                let pane = self.pane(socket, pane)?;
+                self.done(Command::ShowPane { pane })
             }
             CliCommand::AdjustPaneSize { pane, direction, cells } => {
                 let pane = self.pane(socket, pane)?;
@@ -211,6 +229,8 @@ mod tests {
     use std::ffi::OsString;
 
     use super::*;
+    use crate::cli::args::PlaceArgs;
+    use crate::mux::{Anchor, Extent};
     use crate::server::{self, Listener};
 
     fn cli(socket: &Path, command: CliCommand) -> Result<String, String> {
@@ -292,6 +312,43 @@ mod tests {
             assert!(start.elapsed() < Duration::from_secs(10), "the shell never echoed");
             thread::sleep(Duration::from_millis(20));
         }
+
+        let place =
+            PlaceArgs { anchor: Some(Anchor::TopRight), width: Some(Extent::Percent(40)), ..PlaceArgs::default() };
+        let float = CliCommand::FloatPane { pane: pane(Some(first)), place, hidden: false, program: program(&["sh"]) };
+        let float: PaneId = cli(&socket, float).expect("floated").trim().parse().expect("a pane id");
+        let entry = |panes: &[serde_json::Value]| {
+            panes
+                .iter()
+                .find(|p| p["pane_id"] == float.to_string().parse::<u64>().expect("id"))
+                .cloned()
+                .expect("listed")
+        };
+        let floating = entry(&list(&socket));
+        assert_eq!(floating["focused"], true, "a new float takes the keys");
+        assert_eq!((floating["x"].as_u64(), floating["cols"].as_u64()), (Some(48), Some(32)));
+        let expected =
+            r#"{"anchor":"top-right","width":"40%","height":"80%","x_offset":0,"y_offset":0,"hidden":false}"#;
+        assert_eq!(floating["floating"], serde_json::from_str::<serde_json::Value>(expected).expect("json"));
+        let split = CliCommand::SplitPane {
+            pane: pane(Some(float)),
+            right: true,
+            down: false,
+            percent: None,
+            program: program(&[]),
+        };
+        assert!(cli(&socket, split).is_err(), "a float does not split");
+        assert!(cli(&socket, CliCommand::HidePane { pane: pane(Some(first)) }).is_err(), "a tiled pane does not hide");
+
+        let place = PlaceArgs { anchor: Some(Anchor::BottomLeft), x_offset: Some(3), ..PlaceArgs::default() };
+        cli(&socket, CliCommand::PlacePane { pane: pane(Some(float)), place }).expect("placed");
+        cli(&socket, CliCommand::HidePane { pane: pane(Some(float)) }).expect("hidden");
+        let hidden = entry(&list(&socket));
+        assert_eq!((hidden["x"].as_u64(), hidden["focused"].as_bool()), (Some(3), Some(false)));
+        assert_eq!(hidden["floating"]["hidden"], true);
+        cli(&socket, CliCommand::ShowPane { pane: pane(Some(float)) }).expect("shown");
+        assert_eq!(entry(&list(&socket))["focused"], true);
+        cli(&socket, CliCommand::KillPane { pane: pane(Some(float)) }).expect("killed");
 
         cli(&socket, CliCommand::KillPane { pane: pane(Some(second)) }).expect("killed");
         assert_eq!(list(&socket).len(), 1);
