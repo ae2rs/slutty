@@ -213,6 +213,31 @@ impl Terminal {
         })
     }
 
+    /// Lines `start..=end` as plain text, one per row, each ending in a
+    /// newline. Line 0 is the top row of the screen and negative lines are
+    /// scrollback; no `end` is the bottom row. Lines out of range are left out.
+    pub fn text(&self, start: i32, end: Option<i32>) -> String {
+        let rows = i64::from(self.shared.geometry.get().rows);
+        let total = self.vt.total_rows().map_or(rows, |total| i64::try_from(total).unwrap_or(i64::MAX));
+        // Where screen line 0 is among all the rows.
+        let top = total - rows;
+        let first = (top + i64::from(start)).max(0);
+        let last = (top + end.map_or(rows - 1, i64::from)).min(total - 1);
+        let all = Formatter::new(&self.vt)
+            .and_then(|mut f| f.set_format(Format::Plain)?.set_unwrap(false)?.set_trim(true)?.format_alloc(None));
+        let all = match all {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(err) => {
+                log::warn!("reading the screen failed: {err}");
+                return String::new();
+            }
+        };
+        // One line per row; the blank rows at the end are left out.
+        let lines: Vec<&str> = all.split('\n').collect();
+        let line = |row: i64| usize::try_from(row).ok().and_then(|row| lines.get(row)).copied().unwrap_or_default();
+        (first..=last).map(|row| format!("{}\n", line(row))).collect()
+    }
+
     /// The OSC 8 link over a viewport cell: the cells it covers on that row
     /// (`start..end`) and its URI.
     pub fn hyperlink_at(&self, col: u16, row: u16) -> Option<(u16, u16, String)> {
@@ -536,6 +561,16 @@ mod tests {
     /// The left edge of a cell: a drag there ends before the cell.
     fn at(col: u16, row: u16) -> Pointer {
         Pointer { col, row, x: f32::from(col) * 8.0 + 1.0, y: f32::from(row) * 16.0 + 8.0 }
+    }
+
+    #[test]
+    fn text_counts_lines_from_the_top_of_the_screen() {
+        // Four rows: a and b scroll off, and the bottom row is blank.
+        let t = terminal("a\r\nb\r\nc\r\nd\r\ne\r\n");
+        assert_eq!(t.text(0, None), "c\nd\ne\n\n");
+        assert_eq!(t.text(-2, Some(0)), "a\nb\nc\n");
+        assert_eq!(t.text(-100, Some(-2)), "a\n", "lines out of range are left out");
+        assert_eq!(t.text(3, Some(1)), "");
     }
 
     #[test]
