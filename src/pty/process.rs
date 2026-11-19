@@ -6,11 +6,13 @@ use std::os::fd::{AsRawFd, BorrowedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 /// Programs that are only a prompt: closing them loses nothing, so closing
 /// their pane needs no confirmation. WezTerm's list.
 const SHELLS: [&str; 6] = ["bash", "sh", "zsh", "fish", "tmux", "nu"];
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Process {
     /// The executable.
     pub path: PathBuf,

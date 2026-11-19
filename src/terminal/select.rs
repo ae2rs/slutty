@@ -16,6 +16,7 @@ use libghostty_vt::selection::gesture::{
     self, Autoscroll, AutoscrollTickEvent, DragEvent, Gesture, PressEvent, ReleaseEvent,
 };
 use libghostty_vt::terminal::ScrollViewport;
+use serde::{Deserialize, Serialize};
 
 use super::copy_mode::{self, Command, CopyMode, Pos};
 use super::emulator::Terminal;
@@ -26,7 +27,7 @@ const MULTI_CLICK: Duration = Duration::from_millis(500);
 
 /// The mouse over a pane: the cell under it and its place in device pixels
 /// from the pane's corner.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Pointer {
     pub col: u16,
     pub row: u16,
@@ -44,7 +45,7 @@ pub enum Release {
 }
 
 /// One row's part of a search match.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Highlight {
     pub row: u16,
     pub start: u16,
@@ -54,7 +55,7 @@ pub struct Highlight {
     pub current: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchStatus {
     pub needle: String,
     /// The match moved to, counting from 1.

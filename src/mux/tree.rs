@@ -4,12 +4,12 @@
 //! does, and keeps the share of the first side so a window resize scales
 //! both.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::PaneId;
 
 /// A rectangle of cells.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rect {
     pub x: u16,
     pub y: u16,
@@ -18,7 +18,7 @@ pub struct Rect {
 }
 
 /// How a split lays out its two sides.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Axis {
     /// Side by side: the second side is to the right.
     Row,
@@ -26,7 +26,7 @@ pub enum Axis {
     Column,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Direction {
     Left,

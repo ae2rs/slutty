@@ -18,6 +18,8 @@ use libghostty_vt::report::{ColorScheme, SizeReportSize};
 use libghostty_vt::terminal::{CursorStyle, ScrollViewport};
 use libghostty_vt::{Error, RenderState, focus, paste};
 
+use serde::{Deserialize, Serialize};
+
 use super::copy_mode::CopyMode;
 use super::frame::{Frame, Iterators, SelectionColors};
 use super::select::{Searching, Selector};
@@ -29,7 +31,7 @@ use crate::config::{self, Config};
 const HOLD_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// A grid of cells, with the cell size in device pixels.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Geometry {
     pub cols: u16,
     pub rows: u16,
@@ -91,7 +93,7 @@ pub(super) struct Shared {
 }
 
 /// A desktop notification a program asked for (OSC 9, OSC 777).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Notification {
     /// Empty when the program gave none, as with OSC 9.
     pub title: String,

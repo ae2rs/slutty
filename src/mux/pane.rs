@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use libghostty_vt::key::Mods;
+use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::pty::{Process, Pty, ReadStatus, Spawn, WindowSize};
@@ -29,7 +30,7 @@ const PUMP_BUDGET: usize = 1024 * 1024;
 pub type Wake = Arc<dyn Fn() + Send + Sync>;
 
 /// What the tab bar and the window title show of a pane.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaneInfo {
     /// The title the program set, if any.
     pub title: String,
@@ -40,7 +41,7 @@ pub struct PaneInfo {
 }
 
 /// rho's state, from its `rho_activity` user variable.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RhoActivity {
     Working,
     Question,

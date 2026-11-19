@@ -6,8 +6,11 @@ use libghostty_vt::color::Rgb;
 use libghostty_vt::render::{CellIterator, Colors, CursorVisualStyle, Dirty, RowIteration, RowIterator, Snapshot};
 use libghostty_vt::screen::CellWide;
 use libghostty_vt::style::Underline;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+use crate::proto::wire;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Grapheme {
     Empty,
     Char(char),
@@ -25,7 +28,7 @@ impl Grapheme {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CellStyle {
     pub bold: bool,
     pub italic: bool,
@@ -38,23 +41,26 @@ pub struct CellStyle {
     pub wide: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cell {
     pub text: Grapheme,
+    #[serde(with = "wire::rgb")]
     pub fg: Rgb,
     /// `None` shows the terminal background.
+    #[serde(with = "wire::opt_rgb")]
     pub bg: Option<Rgb>,
     pub style: CellStyle,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Row {
     pub cells: Vec<Cell>,
     /// Changed since the renderer last read it.
+    #[serde(skip)]
     pub dirty: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CursorShape {
     Block,
     Bar,
@@ -62,12 +68,13 @@ pub enum CursorShape {
     BlockHollow,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cursor {
     pub x: u16,
     pub y: u16,
     pub shape: CursorShape,
     pub wide: bool,
+    #[serde(with = "wire::opt_rgb")]
     pub color: Option<Rgb>,
     /// The program asked for a blinking cursor (DECSCUSR, mode 12), or left
     /// the configured default.

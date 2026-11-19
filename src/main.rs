@@ -4,6 +4,7 @@ mod font;
 mod keys;
 mod mux;
 mod platform;
+mod proto;
 mod pty;
 mod renderer;
 mod scan;

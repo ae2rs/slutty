@@ -2,6 +2,8 @@
 //! WezTerm's vim-like motions, and the selection it spans. Pure: it reads
 //! the text through [`Grid`].
 
+use serde::{Deserialize, Serialize};
+
 /// A cell in screen coordinates: rows count from the top of the scrollback.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Pos {
@@ -20,14 +22,14 @@ pub trait Grid {
     fn viewport(&self) -> (u32, u16);
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Kind {
     Cell,
     Line,
     Block,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Motion {
     Left,
     Right,
@@ -52,13 +54,13 @@ pub enum Motion {
 }
 
 /// `f`, `t`, `F` and `T`: to the next character typed, or just before it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Jump {
     pub forward: bool,
     pub till: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Command {
     Move(Motion),
     /// Starts a selection of this kind, or ends it when it is already one.
