@@ -10,7 +10,9 @@ use libghostty_vt::mouse;
 use serde::{Deserialize, Serialize};
 
 use super::wire;
-use crate::mux::{Axis, Direction, PaneId, PaneInfo, Rect, RhoActivity, WindowId};
+use crate::mux::{
+    Anchor, Axis, Direction, Extent, Float, PaneId, PaneInfo, Place, PlaceChange, Rect, RhoActivity, WindowId,
+};
 use crate::terminal::copy_mode;
 use crate::terminal::{Cursor, Geometry, Highlight, Notification, Pointer, Row, SearchStatus};
 
@@ -114,6 +116,43 @@ pub enum Command {
     ToggleZoom {
         pane: PaneId,
     },
+    /// Opens a float over the tab of `pane`. It gets the keys unless
+    /// `hidden`.
+    FloatPane {
+        pane: PaneId,
+        place: Place,
+        hidden: bool,
+        program: Program,
+    },
+    /// Changes where the float `pane` goes.
+    PlacePane {
+        pane: PaneId,
+        change: PlaceChange,
+    },
+    /// Moves the float `pane` by `cells`, no further than the tab's edges.
+    MovePane {
+        pane: PaneId,
+        direction: Direction,
+        cells: u16,
+    },
+    /// Hides the float `pane`. Its program runs on.
+    HidePane {
+        pane: PaneId,
+    },
+    /// Shows the float `pane` on top and gives it the keys.
+    ShowPane {
+        pane: PaneId,
+    },
+    /// Hides the floats of the window's active tab when one shows, else
+    /// shows them all. With none, opens one running the login shell:
+    /// [`Reply::Spawned`].
+    ToggleFloats {
+        window: WindowId,
+    },
+    /// Moves the keys from the tiled panes through the floats shown and back.
+    CycleFloats {
+        window: WindowId,
+    },
     RotatePanes {
         window: WindowId,
     },
@@ -200,6 +239,26 @@ pub struct PaneEntry {
     pub focused: bool,
     /// Its tab is zoomed on it.
     pub zoomed: bool,
+    /// Where it floats; `None` when it is tiled.
+    pub floating: Option<Floating>,
+}
+
+/// Where a pane floats, flat for JSON: postcard cannot flatten.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Floating {
+    pub anchor: Anchor,
+    pub width: Extent,
+    pub height: Extent,
+    pub x_offset: i16,
+    pub y_offset: i16,
+    pub hidden: bool,
+}
+
+impl Floating {
+    pub fn new(float: &Float) -> Self {
+        let Place { anchor, width, height, x_offset, y_offset } = float.place;
+        Self { anchor, width, height, x_offset, y_offset, hidden: float.hidden }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -346,11 +405,26 @@ pub struct WindowState {
     pub size: Geometry,
     pub tabs: Vec<TabState>,
     pub active_tab: usize,
-    /// The active tab's panes on screen, with their place in cells.
+    /// The active tab's tiled panes on screen, with their place in cells.
     pub panes: Vec<(PaneId, Rect)>,
     pub dividers: Vec<(Axis, Rect)>,
+    /// The floats shown over them, the last on top.
+    pub floats: Vec<(PaneId, Rect)>,
     /// The pane keys go to.
     pub active_pane: PaneId,
+}
+
+impl WindowState {
+    /// Every pane on screen, from the bottom up: the tiled ones, then the
+    /// floats.
+    pub fn shown(&self) -> impl DoubleEndedIterator<Item = (PaneId, Rect)> + '_ {
+        self.panes.iter().chain(&self.floats).copied()
+    }
+
+    /// Where `pane` is on screen.
+    pub fn rect(&self, pane: PaneId) -> Option<Rect> {
+        self.shown().find(|(id, _)| *id == pane).map(|(_, rect)| rect)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -7,10 +7,10 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::config::{self, Config};
-use crate::mux::{Layout, Mux, Pane, PaneId, Placement, WindowId};
+use crate::mux::{Layout, Mux, Pane, PaneId, Place, Placement, WindowId};
 use crate::proto::{
-    Command, Event, Gesture, Hover, Input, Mode, ModeOp, PaneEntry, PaneOverlay, PaneUpdate, Program, Reply, TabState,
-    WindowState,
+    Command, Event, Floating, Gesture, Hover, Input, Mode, ModeOp, PaneEntry, PaneOverlay, PaneUpdate, Program, Reply,
+    TabState, WindowState,
 };
 use crate::pty::Spawn;
 use crate::scan::{self, RowText};
@@ -155,8 +155,48 @@ impl Session {
                 Ok(Reply::Done)
             }
             Command::ToggleZoom { pane } => {
-                self.pane(pane)?;
+                self.tiled(pane, "zoomed")?;
                 self.mux.toggle_zoom(pane);
+                Ok(Reply::Done)
+            }
+            Command::FloatPane { pane, place, hidden, program } => {
+                let spawn = spawn(program, self.mux.cwd(pane));
+                let new = self.mux.float_pane(pane, place, hidden, &self.config, spawn).map_err(|e| e.to_string())?;
+                let (window, _) = self.mux.find(new).ok_or("the float closed")?;
+                Ok(spawned(window, new))
+            }
+            Command::PlacePane { pane, change } => {
+                self.floating(pane)?;
+                self.mux.place_float(pane, |place, _| change.apply(place));
+                Ok(Reply::Done)
+            }
+            Command::MovePane { pane, direction, cells } => {
+                self.floating(pane)?;
+                let (cols, rows) = direction.cells(cells);
+                self.mux.place_float(pane, |place, area| place.shift(area, cols, rows));
+                Ok(Reply::Done)
+            }
+            Command::HidePane { pane } => {
+                self.floating(pane)?;
+                self.mux.hide_float(pane);
+                Ok(Reply::Done)
+            }
+            Command::ShowPane { pane } => {
+                self.floating(pane)?;
+                self.mux.reveal(pane);
+                Ok(Reply::Done)
+            }
+            Command::ToggleFloats { window } => {
+                if self.mux.toggle_floats(window) {
+                    return Ok(Reply::Done);
+                }
+                let pane = self.mux.active_pane(window).ok_or_else(|| format!("no window {window}"))?;
+                let spawn = spawn(Program::default(), self.mux.cwd(pane));
+                let new = self.mux.float_pane(pane, Place::default(), false, &self.config, spawn);
+                Ok(spawned(window, new.map_err(|e| e.to_string())?))
+            }
+            Command::CycleFloats { window } => {
+                self.mux.cycle_floats(window);
                 Ok(Reply::Done)
             }
             Command::RotatePanes { window } => {
@@ -281,7 +321,7 @@ impl Session {
                 events.push(Event::Window(state));
             }
         }
-        let visible: Vec<PaneId> = ui.windows.values().flat_map(|w| w.panes.iter().map(|(id, _)| *id)).collect();
+        let visible: Vec<PaneId> = ui.windows.values().flat_map(|w| w.shown().map(|(id, _)| id)).collect();
         ui.panes.retain(|id, _| visible.contains(id));
         for id in visible {
             let shown = ui.panes.get(&id);
@@ -327,6 +367,7 @@ impl Session {
                 active: p.active,
                 focused: focused == Some(p.pane),
                 zoomed: p.zoomed,
+                floating: p.float.as_ref().map(Floating::new),
             }
         };
         self.mux.placements().into_iter().map(entry).collect()
@@ -386,6 +427,24 @@ impl Session {
         Some(Hover { pane, row, start: span.start, end: span.end, url: span.text })
     }
 
+    /// Fails unless `pane` floats.
+    fn floating(&mut self, pane: PaneId) -> Result<(), String> {
+        self.pane(pane)?;
+        match self.mux.float(pane) {
+            Some(_) => Ok(()),
+            None => Err(format!("pane {pane} does not float")),
+        }
+    }
+
+    /// Fails unless `pane` is tiled; a float cannot be `what`.
+    fn tiled(&mut self, pane: PaneId, what: &str) -> Result<(), String> {
+        self.pane(pane)?;
+        match self.mux.float(pane) {
+            Some(_) => Err(format!("pane {pane} floats and cannot be {what}")),
+            None => Ok(()),
+        }
+    }
+
     fn pane(&mut self, pane: PaneId) -> Result<&mut Pane, String> {
         self.mux.pane_mut(pane).ok_or_else(|| no_pane(pane))
     }
@@ -427,7 +486,7 @@ fn spawn(program: Program, cwd: Option<PathBuf>) -> Spawn {
 
 fn window_state(mux: &Mux, id: WindowId) -> Option<WindowState> {
     let tabs = mux.tabs(id).into_iter().map(|tab| TabState { info: tab.info.clone(), panes: tab.panes }).collect();
-    let Layout { panes, dividers, .. } = mux.layout(id);
+    let Layout { panes, dividers, floats } = mux.layout(id);
     Some(WindowState {
         id,
         size: mux.size(id)?,
@@ -435,6 +494,7 @@ fn window_state(mux: &Mux, id: WindowId) -> Option<WindowState> {
         active_tab: mux.active_tab(id)?,
         panes,
         dividers,
+        floats,
         active_pane: mux.active_pane(id)?,
     })
 }

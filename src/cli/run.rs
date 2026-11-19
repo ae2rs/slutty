@@ -259,6 +259,7 @@ mod tests {
             "active",
             "cols",
             "cwd",
+            "floating",
             "focused",
             "pane_id",
             "process",
@@ -318,6 +319,7 @@ mod tests {
             active: focused,
             focused,
             zoomed: false,
+            floating: None,
         };
         let table = table(&[entry(2, false), entry(13, true)]);
         assert_eq!(

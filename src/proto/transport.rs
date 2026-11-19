@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 /// Any change to a message bumps this; both sides must match exactly.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 const MAGIC: [u8; 4] = *b"SLTY";
 

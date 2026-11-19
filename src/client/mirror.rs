@@ -100,15 +100,15 @@ impl Mirror {
         self.panes.get(&pane).map(|p| &p.frame)
     }
 
-    /// The panes on screen in `window` with their place in cells, and the
-    /// frames they show.
+    /// The panes on screen in `window` from the bottom up, with their place
+    /// in cells, and the frames they show.
     pub fn visible(&mut self, window: WindowId) -> Vec<(PaneId, Rect, &mut Frame)> {
         let Some(w) = self.windows.get(&window) else { return Vec::new() };
-        let rects: BTreeMap<PaneId, Rect> = w.panes.iter().copied().collect();
+        let rects: BTreeMap<PaneId, Rect> = w.shown().collect();
         let mut panes: Vec<_> =
             self.panes.iter_mut().filter_map(|(id, shown)| Some((*id, *rects.get(id)?, &mut shown.frame))).collect();
         // In layout order, as the server sent them.
-        panes.sort_by_key(|(id, ..)| w.panes.iter().position(|(p, _)| p == id));
+        panes.sort_by_key(|(id, ..)| w.shown().position(|(p, _)| p == *id));
         panes
     }
 
@@ -116,7 +116,7 @@ impl Mirror {
     /// takes.
     pub fn take_undrawn(&mut self, window: WindowId) -> Vec<PaneId> {
         let Some(w) = self.windows.get(&window) else { return Vec::new() };
-        let drawn: Vec<PaneId> = w.panes.iter().map(|(id, _)| *id).filter(|id| self.undrawn.contains(id)).collect();
+        let drawn: Vec<PaneId> = w.shown().map(|(id, _)| id).filter(|id| self.undrawn.contains(id)).collect();
         for id in &drawn {
             self.undrawn.remove(id);
         }
@@ -124,13 +124,13 @@ impl Mirror {
     }
 
     fn window_showing(&self, pane: PaneId) -> Option<WindowId> {
-        self.windows.values().find(|w| w.panes.iter().any(|(id, _)| *id == pane)).map(|w| w.id)
+        self.windows.values().find(|w| w.rect(pane).is_some()).map(|w| w.id)
     }
 
     /// Forgets panes no window shows; the server sends them whole when they
     /// show again.
     fn drop_hidden_panes(&mut self) {
-        let shown: BTreeSet<PaneId> = self.windows.values().flat_map(|w| w.panes.iter().map(|(id, _)| *id)).collect();
+        let shown: BTreeSet<PaneId> = self.windows.values().flat_map(|w| w.shown().map(|(id, _)| id)).collect();
         self.panes.retain(|id, _| shown.contains(id));
         self.undrawn.retain(|id| shown.contains(id));
     }
@@ -177,6 +177,7 @@ mod tests {
             active_tab: 0,
             panes: panes.iter().map(|p| (*p, rect)).collect(),
             dividers: Vec::new(),
+            floats: Vec::new(),
             active_pane: panes[0],
         }
     }
