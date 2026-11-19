@@ -78,6 +78,11 @@
 "leader p" = "pane-select"
 "cmd+p" = "pane-select"
 
+"leader f" = "toggle-floating"
+"leader F" = "new-floating"
+"leader tab" = "cycle-floating"
+"leader w" = { action = "key-table", name = "float", sticky = true }
+
 "leader R" = "reload-config"
 "cmd+R" = "reload-config"
 "alt+enter" = "toggle-fullscreen"
@@ -99,6 +104,34 @@
 "down" = { action = "resize-pane", direction = "down" }
 "up" = { action = "resize-pane", direction = "up" }
 "right" = { action = "resize-pane", direction = "right" }
+"escape" = "pop-table"
+"enter" = "pop-table"
+"ctrl+c" = "pop-table"
+
+# Move the active floating pane a cell at a time, resize it with shift, or
+# put it at an anchor laid out as on a numpad, until escape.
+[tables.float]
+"h" = { action = "move-pane", direction = "left" }
+"j" = { action = "move-pane", direction = "down" }
+"k" = { action = "move-pane", direction = "up" }
+"l" = { action = "move-pane", direction = "right" }
+"left" = { action = "move-pane", direction = "left" }
+"down" = { action = "move-pane", direction = "down" }
+"up" = { action = "move-pane", direction = "up" }
+"right" = { action = "move-pane", direction = "right" }
+"H" = { action = "resize-pane", direction = "left" }
+"J" = { action = "resize-pane", direction = "down" }
+"K" = { action = "resize-pane", direction = "up" }
+"L" = { action = "resize-pane", direction = "right" }
+"7" = { action = "anchor-pane", anchor = "top-left" }
+"8" = { action = "anchor-pane", anchor = "top" }
+"9" = { action = "anchor-pane", anchor = "top-right" }
+"4" = { action = "anchor-pane", anchor = "left" }
+"5" = { action = "anchor-pane", anchor = "center" }
+"6" = { action = "anchor-pane", anchor = "right" }
+"1" = { action = "anchor-pane", anchor = "bottom-left" }
+"2" = { action = "anchor-pane", anchor = "bottom" }
+"3" = { action = "anchor-pane", anchor = "bottom-right" }
 "escape" = "pop-table"
 "enter" = "pop-table"
 "ctrl+c" = "pop-table"

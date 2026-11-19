@@ -8,7 +8,7 @@ use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
 use super::chord::Chord;
-use crate::mux::Direction;
+use crate::mux::{Anchor, Direction, Extent};
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(tag = "action", rename_all = "kebab-case", deny_unknown_fields)]
@@ -86,6 +86,36 @@ pub enum Action {
     QuickSelect,
     /// Labels the URLs on screen; a label opens one.
     OpenUrl,
+    /// Hides the tab's floating panes when one shows, else shows them all.
+    /// With none, opens one running the shell.
+    ToggleFloating,
+    /// Opens a floating pane running the shell.
+    NewFloating {
+        #[serde(default)]
+        anchor: Anchor,
+        /// `"40%"` of the tab, or `"40"` cells.
+        #[serde(default = "most")]
+        width: Extent,
+        #[serde(default = "most")]
+        height: Extent,
+    },
+    /// Moves the keys from the tiled panes through the floating ones and
+    /// back.
+    CycleFloating,
+    /// Moves the active floating pane.
+    MovePane {
+        direction: Direction,
+        #[serde(default = "one")]
+        cells: u16,
+    },
+    /// Puts the active floating pane at an anchor of the tab.
+    AnchorPane {
+        anchor: Anchor,
+    },
+}
+
+fn most() -> Extent {
+    Extent::Percent(80)
 }
 
 fn one() -> u16 {

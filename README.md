@@ -6,7 +6,7 @@ A fast, native macOS terminal emulator and multiplexer, built on [libghostty-vt]
 
 - **Native.** AppKit window, Metal drawing, CoreText shaping, system input methods.
 - **Idle when idle.** Draws only what changed. No polling, no timers while nothing moves.
-- **A multiplexer built in.** Windows, tabs, splits, zoom, copy mode, search, quick select.
+- **A multiplexer built in.** Windows, tabs, splits, floating panes, zoom, copy mode, search, quick select. Sessions outlive the app.
 - **Declarative config.** One TOML file, reloaded on save. No scripting.
 
 slutty replaces my WezTerm setup: its feature list is that config, not WezTerm itself.
@@ -78,6 +78,9 @@ The leader is `ctrl+s`. A few defaults:
 | `leader c` | Copy mode, with vim keys |
 | `leader space` | Quick select |
 | `cmd+o` | Open a URL on screen |
+| `leader f` | Show or hide the floating panes; with none, open one |
+| `leader tab` | Move the keys through the floating panes and back |
+| `leader w` | Move a floating pane with `hjkl`, resize it with `HJKL`, anchor it with `1`…`9`, until `escape` |
 
 The full list is in [`src/keys/defaults.toml`](src/keys/defaults.toml).
 

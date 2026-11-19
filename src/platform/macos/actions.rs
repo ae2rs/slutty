@@ -11,7 +11,7 @@ use super::app;
 use super::state::{self, with_app};
 use super::view::TerminalView;
 use crate::keys::Action;
-use crate::mux::{Axis, PaneId};
+use crate::mux::{Axis, PaneId, Place, PlaceChange};
 use crate::proto::{Command, KeyEvent, Program};
 
 impl TerminalView {
@@ -103,6 +103,31 @@ impl TerminalView {
             Action::Search => on_pane(|pane| Command::Search { pane }),
             Action::QuickSelect => self.start_quick_select(false),
             Action::OpenUrl => self.start_quick_select(true),
+            Action::ToggleFloating => _ = with_app(|app| app.request(Command::ToggleFloats { window })),
+            Action::NewFloating { anchor, width, height } => {
+                if let Some(pane) = pane {
+                    let place = Place { anchor, width, height, x_offset: 0, y_offset: 0 };
+                    let program = Program::default();
+                    with_app(|app| app.request(Command::FloatPane { pane, place, hidden: false, program }));
+                }
+            }
+            Action::CycleFloating => _ = with_app(|app| app.request(Command::CycleFloats { window })),
+            Action::MovePane { direction, cells } => {
+                if let Some(pane) = pane {
+                    with_app(|app| app.request(Command::MovePane { pane, direction, cells }));
+                }
+            }
+            Action::AnchorPane { anchor } => {
+                if let Some(pane) = pane {
+                    let change = PlaceChange {
+                        anchor: Some(anchor),
+                        x_offset: Some(0),
+                        y_offset: Some(0),
+                        ..Default::default()
+                    };
+                    with_app(|app| app.request(Command::PlacePane { pane, change }));
+                }
+            }
             // The matcher runs these itself.
             Action::KeyTable { .. } | Action::PopTable => {}
         }
